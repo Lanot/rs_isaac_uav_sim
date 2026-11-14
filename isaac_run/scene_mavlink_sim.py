@@ -28,6 +28,8 @@ parser.add_argument('--num_drones', type=int, default=1,
 parser.add_argument('--headless', action='store_true', help='Run without GUI')
 parser.add_argument('--config', type=str, default='',
                     help='Path to drone YAML configuration file (optional)')
+parser.add_argument('--world_usd', default='',
+                    help='Absolute path to a custom environment USD')
 parser.add_argument('--base_port', type=int, default=4560,
                     help='Base MAVLink TCP port; drone i uses base_port+i+1 (default: 4560)')
 parser.add_argument('--connection_ip', type=str, default='localhost',
@@ -110,6 +112,7 @@ if not args.headless:
 # ---------------------------------------------------------------------------
 from isaacsim.core.api.objects import GroundPlane  # noqa: E402
 from isaacsim.core.api.world import World  # noqa: E402
+from isaacsim.core.utils.stage import add_reference_to_stage  # noqa: E402
 from pxr import Gf, Sdf, UsdGeom, UsdLux  # noqa: E402
 
 from rs_isaac_uav_sim.sim.config import (  # noqa: E402
@@ -145,6 +148,11 @@ def setup_physics_scene(world):
 # 4. Environment (ground + lighting)
 # ---------------------------------------------------------------------------
 def setup_environment(world):
+    if args.world_usd:
+        add_reference_to_stage(usd_path=args.world_usd, prim_path='/World/Environment')
+        print(f'[ENV] Loaded custom world: {args.world_usd}')
+        return
+
     GroundPlane(prim_path='/World/GroundPlane', z_position=0.0)
 
     stage = world.stage

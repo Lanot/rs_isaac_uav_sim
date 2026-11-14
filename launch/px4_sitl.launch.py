@@ -145,6 +145,7 @@ def _launch_setup(context, *args, **kwargs):  # noqa: ARG001
     num_drones = int(LaunchConfiguration('num_drones').perform(context))
     headless = LaunchConfiguration('headless').perform(context)
     config_file = LaunchConfiguration('config_file').perform(context)
+    world_usd = LaunchConfiguration('world_usd').perform(context)
     display_terminal = LaunchConfiguration('display_terminal').perform(context)
     base_port = LaunchConfiguration('base_port').perform(context)
     connection_ip = LaunchConfiguration('connection_ip').perform(context)
@@ -197,6 +198,8 @@ def _launch_setup(context, *args, **kwargs):  # noqa: ARG001
         isaac_cmd.append('--verbose')
     if config_file:
         isaac_cmd.extend(['--config', config_file])
+    if world_usd:
+        isaac_cmd.extend(['--world_usd', world_usd])
     if ros2_namespaces:
         isaac_cmd.extend(['--ros2_namespaces', ros2_namespaces])
 
@@ -290,6 +293,11 @@ def generate_launch_description():
                 'overrides are NOT read from this file — pass them as an '
                 'airframe shell script via airframe_file instead.'
             ),
+        ),
+        DeclareLaunchArgument(
+            'world_usd',
+            default_value='',
+            description='Absolute path to a custom Isaac Sim environment USD'
         ),
         DeclareLaunchArgument(
             'base_port',
