@@ -36,6 +36,8 @@ from .sensors import (
 )
 from .state import VehicleState
 
+from rclpy.logging import get_logger
+
 # Resolve the package's installed assets directory at import time so the path
 # follows the colcon install layout instead of hard-coded developer paths.
 ASSETS_DIR = os.path.join(
@@ -91,6 +93,8 @@ class DroneSimManager:
         gps_origin: Optional[GPSOrigin] = None,
         verbose: bool = False,
     ):
+        self._logger = get_logger(self.__class__.__name__)
+
         self.namespaces = namespaces
         self._verbose = verbose
         self.num_drones = len(namespaces)
@@ -249,7 +253,7 @@ class DroneSimManager:
                 orientation=(_s45, 0.0, 0.0, _s45),
                 usd_path=asset_path,
             )
-            print(
+            self._logger.info(
                 f'[VEHICLE] Spawned {ns} at '
                 f'({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}) '
                 f'from {asset_path}'
@@ -306,14 +310,14 @@ class DroneSimManager:
             (self.num_drones, 3), dtype=torch.float32, device=self._device
         )
 
-        print(f'[VEHICLE] ArticulationView initialized for {self.num_drones} '
+        self._logger.info(f'[VEHICLE] ArticulationView initialized for {self.num_drones} '
               f'drone(s).')
 
         for backend in self.backends:
             backend.connect()
-            print(f'[VEHICLE] MAVLink vehicle {backend._vehicle_id} '
+            self._logger.info(f'[VEHICLE] MAVLink vehicle {backend._vehicle_id} '
                   f'listening on TCP port {backend.port}')
-            print(f'[VEHICLE] Waiting for PX4 heartbeat on vehicle {backend._vehicle_id}...')
+            self._logger.info(f'[VEHICLE] Waiting for PX4 heartbeat on vehicle {backend._vehicle_id}...')
             if not backend.wait_for_heartbeat(timeout=30.0):
                 raise RuntimeError(
                     f'Vehicle {backend._vehicle_id}: no heartbeat within 30 s — '
@@ -394,7 +398,7 @@ class DroneSimManager:
                 self._stable_count[i] = 0
             if not self._stabilized[i] and self._stable_count[i] >= _STABLE_STEPS:
                 self._stabilized[i] = True
-                print(f'[VEHICLE] Drone {i} stabilized at '
+                self._logger.info(f'[VEHICLE] Drone {i} stabilized at '
                       f't={SimulationContext.instance().current_time:.2f}s '
                       f'— switching to real sensor data')
 
@@ -528,14 +532,14 @@ class DroneSimManager:
         else:
             render_str = 'N/A (headless)'
 
-        print(f'[DIAG t={SimulationContext.instance().current_time:.1f}s]')
-        print(f'  Loop  : {loop_str}  (begin={t_begin_str}  end={t_end_str})')
-        print(f'  Render: {render_str}')
-        print(
+        self._logger.info(f'[DIAG t={SimulationContext.instance().current_time:.1f}s]')
+        self._logger.info(f'  Loop  : {loop_str}  (begin={t_begin_str}  end={t_end_str})')
+        self._logger.info(f'  Render: {render_str}')
+        self._logger.info(
             f'  PX4  : {px4_str}  '
             f'(sensor_sent={sensor_sent_str}  actuator_recv={actuator_recv_str})'
         )
-        print(f'  sync={offset_str}  rt={rt_str}')
+        self._logger.info(f'  sync={offset_str}  rt={rt_str}')
 
         for i, b in enumerate(self.backends):
             ctrl = b.raw_controls
@@ -552,7 +556,7 @@ class DroneSimManager:
             av = imu.get('angular_velocity', [float('nan')] * 3)
             la = imu.get('linear_acceleration', [float('nan')] * 3)
             mf = mag.get('magnetic_field', [float('nan')] * 3)
-            print(
+            self._logger.info(
                 f'  drone{i}: armed={armed_flag} mode=0x{b.raw_mode:02x} '
                 f'raw=[{ctrl[0]:.3f}, {ctrl[1]:.3f}, {ctrl[2]:.3f}, '
                 f'{ctrl[3]:.3f}] '
@@ -577,7 +581,7 @@ class DroneSimManager:
             gt_lat = gps_d.get('latitude_gt', float('nan'))
             gt_lon = gps_d.get('longitude_gt', float('nan'))
             gt_alt = gps_d.get('altitude_gt', float('nan'))
-            print(
+            self._logger.info(
                 f'  [GTRUTH] rpy(NED/FRD)=[{rpy_ned[0]:.2f}, {rpy_ned[1]:.2f},'
                 f'{rpy_ned[2]:.2f}]°'
                 f'  vel(NED)=[{vel_ned[0]:.3f}, {vel_ned[1]:.3f},'
@@ -587,7 +591,7 @@ class DroneSimManager:
             )
 
             if gps_vo and self._sensor_params.localization_mode == 'gps':
-                print(
+                self._logger.info(
                     f'  [SENSORS] GPS lat={gps_vo.get("latitude", float("nan")):.6f}°'
                     f'  lon={gps_vo.get("longitude", float("nan")):.6f}°'
                     f'  alt={gps_vo.get("altitude", float("nan")):.2f} m'
