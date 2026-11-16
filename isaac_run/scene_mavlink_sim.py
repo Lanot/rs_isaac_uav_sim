@@ -325,11 +325,15 @@ def main():
         sensor_params = cfg['sensor']
         mavlink_params = cfg['mavlink']
         gps_origin = cfg['gps_origin']
+        positions = cfg['positions']
+        scene_camera_view = cfg['scene_camera_view']
     else:
         quad_params = QuadrotorParams()
         sensor_params = SensorParams()
         mavlink_params = MavlinkParams()
         gps_origin = GPSOrigin()
+        positions = None
+        scene_camera_view = None
 
     # Override connection params from CLI and derive num_rotors from config
     mavlink_params.base_port = args.base_port
@@ -378,10 +382,18 @@ def main():
     )
 
     # Spawn USD drone assets into the stage (computes default grid positions)
-    manager.spawn_drones(world)
+    manager.spawn_drones(world, positions)
 
     # Reset world — initialises physics context and USD stage
     world.reset()
+
+    if scene_camera_view is not None and not args.headless:
+        from isaacsim.core.utils.viewports import set_camera_view
+
+        set_camera_view(
+            eye=scene_camera_view['eye'],
+            target=scene_camera_view['target'],
+        )
 
     # Initialise GPU tensor views and connect MAVLink
     manager.initialize()

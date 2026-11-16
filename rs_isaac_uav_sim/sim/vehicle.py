@@ -235,6 +235,11 @@ class DroneSimManager:
         if positions is None:
             positions = self._grid_positions(self.num_drones)
 
+        if len(positions) < self.num_drones:
+            raise ValueError(
+                f'Expected {self.num_drones} spawn positions, got {len(positions)}'
+            )
+
         if self.quad_params.usd_asset:
             asset_path = os.path.join(ASSETS_DIR, self.quad_params.usd_asset)
         else:

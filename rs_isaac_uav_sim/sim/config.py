@@ -228,9 +228,9 @@ def load_config_from_yaml(yaml_path: str) -> Dict[str, Any]:
     """
     Read a YAML config file and return populated config dataclass instances.
 
-    Returns a dict with keys 'quadrotor', 'sensor', 'mavlink', 'gps_origin',
-    each being an instance of the corresponding dataclass.  Any key absent from
-    the YAML falls back to the dataclass default.
+    The quadrotor, sensor, mavlink, and gps_origin sections use dataclass
+    defaults for omitted settings. Positions and scene_camera_view are optional
+    and default to None.
     """
     import yaml  # stdlib
 
@@ -243,4 +243,6 @@ def load_config_from_yaml(yaml_path: str) -> Dict[str, Any]:
         'sensor': SensorParams.from_dict(data.get('sensor', {})),
         'mavlink': MavlinkParams.from_dict(data.get('mavlink', {})),
         'gps_origin': GPSOrigin.from_dict(data.get('gps_origin', {})),
+        'positions': data.get('positions'),
+        'scene_camera_view': data.get('scene_camera_view'),
     }
