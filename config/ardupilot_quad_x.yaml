@@ -1,5 +1,5 @@
-# Copyright 2026 ROBOTSIX
-# SPDX-License-Identifier: Apache-2.0
+# Copyright {YEAR} {COMPANY}
+# {LICENSE}
 # Symmetric Quad-X in ArduCopter motor order, FLU body coordinates.
 # Motor 1 front-right CCW, 2 rear-left CCW, 3 front-left CW, 4 rear-right CW.
 # A dedicated geometry avoids the PX4 Iris profile's asymmetric front/rear arms.

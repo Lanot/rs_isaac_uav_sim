@@ -1,5 +1,5 @@
-# Copyright 2026 ROBOTSIX
-# SPDX-License-Identifier: Apache-2.0
+# Copyright {YEAR} {COMPANY}
+# {LICENSE}
 """ArduPilot JSON SITL transport, independent of Isaac Sim and MAVLink.
 
 Protocol: https://github.com/ArduPilot/ardupilot/tree/master/libraries/SITL/examples/JSON

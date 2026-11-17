@@ -1,5 +1,5 @@
-# Copyright 2026 ROBOTSIX
-# SPDX-License-Identifier: Apache-2.0
+# Copyright {YEAR} {COMPANY}
+# {LICENSE}
 """Opt-in real ArduCopter JSON handshake; stationary truth, no flight claim."""
 
 import os

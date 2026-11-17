@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Copyright 2026 ROBOTSIX
-# SPDX-License-Identifier: Apache-2.0
+# Copyright {YEAR} {COMPANY}
+# {LICENSE}
 """Check GUIDED takeoff and LAND on an already running ArduCopter SITL."""
 
 import argparse

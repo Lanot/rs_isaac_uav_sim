@@ -1,5 +1,5 @@
-# Copyright 2026 ROBOTSIX
-# SPDX-License-Identifier: Apache-2.0
+# Copyright {YEAR} {COMPANY}
+# {LICENSE}
 """Launch Isaac and a single ArduCopter JSON SITL in isolated runtime state."""
 
 import os

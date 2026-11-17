@@ -1,5 +1,5 @@
-# Copyright 2026 ROBOTSIX
-# SPDX-License-Identifier: Apache-2.0
+# Copyright {YEAR} {COMPANY}
+# {LICENSE}
 """Protocol, frame conversion and dynamics regression checks without Isaac."""
 
 import json

@@ -1,5 +1,5 @@
-# Copyright 2026 ROBOTSIX
-# SPDX-License-Identifier: Apache-2.0
+# Copyright {YEAR} {COMPANY}
+# {LICENSE}
 # Pair with ardupilot_quad_x.yaml and a fresh SITL state directory.
 FRAME_CLASS 1
 FRAME_TYPE 1
