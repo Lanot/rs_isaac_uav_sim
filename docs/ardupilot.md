@@ -1,10 +1,16 @@
 # ArduPilot SITL support
 
 This branch adds an experimental ArduCopter Quad-X integration alongside PX4.
-PX4 remains the default (`--autopilot px4`); its MAVLink backend, launch file,
-Iris YAML, and flight demo are unchanged.
+PX4 remains the default (`--autopilot px4`). Both controllers are selected by
+`sim/autopilot/factory.py` and implement the same abstract adapter contract.
+The PX4 launch file, Iris YAML and flight demo keep their existing behavior.
 
 ## Design and scope
+
+The adapter is in `sim/autopilot/ardupilot/adapter.py` and its JSON transport is
+in `sim/autopilot/ardupilot/backend.py`. Shared contracts and diagnostic data
+are in `sim/autopilot/base/`; `vehicle.py` uses only the adapter interface. See
+[adapter architecture](architecture.md#autopilot-adapters).
 
 ArduPilot's [JSON physics interface](https://ardupilot.org/dev/docs/sitl-with-JSON.html)
 is separate from MAVLink. ArduCopter sends binary motor PWM over UDP; Isaac

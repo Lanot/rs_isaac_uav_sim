@@ -54,6 +54,10 @@ if(BUILD_TESTING)
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   )
 
+  ament_add_pytest_test(test_autopilot_adapters test/unit/test_autopilot_adapters.py
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  )
+
   ament_add_pytest_test(test_ardupilot_json test/unit/test_ardupilot_json.py
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   )

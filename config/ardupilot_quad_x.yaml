@@ -29,7 +29,3 @@ ardupilot:
   pwm_min: 1000
   pwm_max: 2000
   motor_channels: [0, 1, 2, 3]
-gps_origin:
-  lat: 47.24926
-  lon: -1.54844
-  alt: 0.0

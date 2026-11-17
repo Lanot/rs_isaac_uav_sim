@@ -13,7 +13,7 @@ from numpy.testing import assert_allclose
 
 import pytest
 
-from rs_isaac_uav_sim.sim.ardupilot_backend import ArduPilotJSON
+from rs_isaac_uav_sim.sim.autopilot.ardupilot.backend import ArduPilotJSON
 from rs_isaac_uav_sim.sim.config import ArduPilotParams, QuadrotorParams, load_config_from_yaml
 from rs_isaac_uav_sim.sim.dynamics import QuadrotorDynamics
 from rs_isaac_uav_sim.sim.state import VehicleState

@@ -21,23 +21,21 @@ import os
 from typing import Any, Optional
 
 from ament_index_python.packages import get_package_share_directory
-from isaacsim.core.api import SimulationContext
-import numpy as np
-from scipy.spatial.transform import Rotation
 
-from .ardupilot_backend import ArduPilotJSON
-from .config import GPSOrigin, MAVLINK_UPDATE_RATE, MavlinkParams, QuadrotorParams, SensorParams
-from .dynamics import QuadrotorDynamics
-from .mavlink_backend import PX4MavlinkHIL
-from .sensors import (
-    BarometerSensor,
-    GPSSensor,
-    IMUSensor,
-    MagnetometerSensor,
-)
-from .state import VehicleState
+from isaacsim.core.api import SimulationContext
+
+import numpy as np
 
 from rclpy.logging import get_logger
+
+from scipy.spatial.transform import Rotation
+
+from .autopilot import AutopilotAdapter, create_autopilot_adapter
+from .config import (
+    ArduPilotParams, GPSOrigin, MAVLINK_UPDATE_RATE, MavlinkParams, QuadrotorParams, SensorParams,
+)
+from .dynamics import QuadrotorDynamics
+from .state import VehicleState
 
 # Resolve the package's installed assets directory at import time so the path
 # follows the colcon install layout instead of hard-coded developer paths.
@@ -52,12 +50,6 @@ QUADROTOR_ASSET_PATH = os.path.join(
 # physics.usda applies PhysicsArticulationRootAPI to:
 #   <defaultPrim>/Geometry/base_link
 _BASE_LINK_SUFFIX = '/Geometry/base_link'
-
-
-# Stability detection: hold ideal IMU data until the drone settles on the ground
-_STABLE_VEL_MS = 0.05       # m/s  — linear velocity magnitude threshold
-_STABLE_OMEGA_RPS = 0.05    # rad/s — angular velocity magnitude threshold
-_STABLE_STEPS = int(0.5 * MAVLINK_UPDATE_RATE)  # consecutive steps required
 
 
 class DroneSimManager:
@@ -94,65 +86,31 @@ class DroneSimManager:
         gps_origin: Optional[GPSOrigin] = None,
         verbose: bool = False,
         autopilot: str = 'px4',
-        ardupilot_params=None,
+        ardupilot_params: Optional[ArduPilotParams] = None,
     ):
+        """Build physical components and factory-selected adapters without connecting."""
         self._logger = get_logger(self.__class__.__name__)
 
-        if autopilot not in ('px4', 'ardupilot'):
-            raise ValueError(f'Unsupported autopilot: {autopilot}')
-        self.autopilot = autopilot
-        if autopilot == 'ardupilot' and sensor_params and sensor_params.localization_mode != 'gps':
-            raise ValueError('ArduPilot mocap mode is not implemented')
         self.namespaces = namespaces
         self._verbose = verbose
         self.num_drones = len(namespaces)
         self.quad_params = quad_params or QuadrotorParams()
         self.sensor_params = sensor_params or SensorParams()
-        self._sensor_params = self.sensor_params
         self.mavlink_params = mavlink_params or MavlinkParams()
         self.gps_origin = gps_origin or GPSOrigin()
 
         # Per-drone simulation components
         self.states = [VehicleState() for _ in range(self.num_drones)]
         self.dynamics = [QuadrotorDynamics(self.quad_params) for _ in range(self.num_drones)]
-        # Sensor wiring driven by SensorParams.localization_mode (XOR):
-        #   - 'gps'   → GPS + magnetometer streamed over MAVLink
-        #              (HIL_GPS / HIL_SENSOR), PX4 EKF runs GPS+baro+mag.
-        #   - 'mocap' → no GPS, no MAVLink position source. Ground truth
-        #              odometry is exposed on /<drone>/isaac_odom by the
-        #              ROS2PublishOdometry OmniGraph node (see
-        #              scene_mavlink_sim.py); an external bridge forwards
-        #              it to /fmu/in/vehicle_visual_odometry.
-        loc = self._sensor_params.localization_mode
-        self.imu_sensors = [IMUSensor(self.sensor_params) for _ in range(self.num_drones)]
-        self.baro_sensors = [
-            BarometerSensor(self.sensor_params, self.gps_origin) for _ in range(self.num_drones)
+        self.adapters: list[AutopilotAdapter] = [
+            create_autopilot_adapter(
+                autopilot, vehicle_id=i + 1,
+                quad_params=self.quad_params, sensor_params=self.sensor_params,
+                mavlink_params=self.mavlink_params, gps_origin=self.gps_origin,
+                ardupilot_params=ardupilot_params, verbose=verbose, logger=self._logger,
+            )
+            for i in range(self.num_drones)
         ]
-        self.mag_sensors = [
-            MagnetometerSensor(self.sensor_params, self.gps_origin) for _ in range(self.num_drones)
-        ]
-        if loc == 'gps':
-            self.gps_sensors = [
-                GPSSensor(self.sensor_params, self.gps_origin) for _ in range(self.num_drones)
-            ]
-        else:
-            self.gps_sensors = []
-        self.backends: list[Any]
-        if self.autopilot == 'ardupilot':
-            self.backends = [
-                ArduPilotJSON(i + 1, ardupilot_params, self.quad_params)
-                for i in range(self.num_drones)
-            ]
-        else:
-            self.backends = [
-                PX4MavlinkHIL(
-                    vehicle_id=i + 1, params=self.mavlink_params,
-                    quad_params=self.quad_params,
-                    localization_mode=loc,
-                    verbose=self._verbose,
-                )
-                for i in range(self.num_drones)
-            ]
 
         # GPU tensor views — initialized after world.reset()
         self._prims = None        # Articulation view (sleep threshold only)
@@ -163,23 +121,9 @@ class DroneSimManager:
         self._torch: Any = None
         self._device = 'cuda'
 
-        # GPS divider: send GPS at ~50 Hz
-        self._gps_counter = 0
-        self._gps_divider = max(1, round(MAVLINK_UPDATE_RATE / 50.0))
-
-        # Last sensor readings for diagnostics (one dict per drone)
-        self._last_imu: list = [{}] * self.num_drones
-        self._last_baro: list = [{}] * self.num_drones
-        self._last_mag: list = [{}] * self.num_drones
-        self._last_gps_vo: list = [{}] * self.num_drones
-
         # Diagnostic divider: print at ~1 Hz
         self._diag_counter = 0
         self._diag_divider = max(1, round(MAVLINK_UPDATE_RATE / 1.0))
-
-        # Per-drone stability tracking (drone drops a few cm at spawn)
-        self._stable_count: list = [0] * self.num_drones
-        self._stabilized: list = [False] * self.num_drones
 
         # Loop timing tracking (populated by record_loop_timing)
         self._loop_durations: collections.deque = collections.deque(maxlen=500)
@@ -302,7 +246,7 @@ class DroneSimManager:
 
     def initialize(self):
         """
-        Post-reset setup: disable sleep and connect MAVLink backends.
+        Post-reset setup: disable sleep and initialize autopilot adapters.
 
         Must be called AFTER world.reset(). Physics views are already
         initialised by the World during reset(); this method only performs
@@ -330,22 +274,11 @@ class DroneSimManager:
             (self.num_drones, 3), dtype=torch.float32, device=self._device
         )
 
-        self._logger.info(f'[VEHICLE] ArticulationView initialized for {self.num_drones} '
-              f'drone(s).')
+        self._logger.info(
+            f'[VEHICLE] ArticulationView initialized for {self.num_drones} drone(s).')
 
-        for backend in self.backends:
-            backend.connect()
-            if self.autopilot == 'ardupilot':
-                self._logger.info(f'[VEHICLE] ArduPilot JSON listening on UDP {backend.port}')
-                continue
-            self._logger.info(f'[VEHICLE] MAVLink vehicle {backend._vehicle_id} '
-                  f'listening on TCP port {backend.port}')
-            self._logger.info(f'[VEHICLE] Waiting for PX4 heartbeat on vehicle {backend._vehicle_id}...')
-            if not backend.wait_for_heartbeat(timeout=30.0):
-                raise RuntimeError(
-                    f'Vehicle {backend._vehicle_id}: no heartbeat within 30 s — '
-                    f'is PX4 SITL running on port {backend.port}?'
-                )
+        for adapter in self.adapters:
+            adapter.initialize()
 
     def step(self, dt: float):
         """
@@ -355,11 +288,10 @@ class DroneSimManager:
 
         1. Read world poses and velocities from GPU via RigidPrim view.
         2. Convert to ENU/FLU VehicleState.
-        3. Update IMU, barometer, magnetometer sensors.
-        4. Optionally update GPS (at ~50 Hz).
-        5. Send sensor data to MAVLink backend and receive motor commands.
-        6. Compute body-frame forces/torques from motor commands.
-        7. Rotate forces/torques to world frame and apply via GPU tensor API.
+        3. Update each adapter with state and the authoritative physics clock.
+        4. Read adapter motor angular velocities in rad/s.
+        5. Compute body-frame forces/torques from motor commands.
+        6. Rotate forces/torques to world frame and apply via GPU tensor API.
 
         Args:
         ----
@@ -388,12 +320,7 @@ class DroneSimManager:
         forces_world = np.zeros((self.num_drones, 3))
         torques_world = np.zeros((self.num_drones, 3))
 
-        self._gps_counter += 1
-        # Send GPS on the very first step so HIL_STATE_QUATERNION has valid
-        # WGS84 lat/lon/alt before any consumer reads ground truth, then at
-        # the configured 50 Hz rate.
-        send_gps = (self._gps_counter == 1
-                    or (self._gps_counter % self._gps_divider) == 0)
+        simulation_time = SimulationContext.instance().current_time
 
         for i in range(self.num_drones):
             state = self.states[i]
@@ -411,59 +338,16 @@ class DroneSimManager:
             rot = Rotation.from_quat(state.attitude)
             state.angular_velocity = rot.inv().apply(velocities_np[i, 3:])
 
-            backend = self.backends[i]
-            if self.autopilot == 'ardupilot':
-                backend.exchange(state, SimulationContext.instance().current_time, dt)
-            else:
-                # --- 3. Update sensors ---
-                # Detect stability: wait for the drone to settle after spawn drop
-                vel_mag = np.linalg.norm(state.linear_velocity)
-                omega_mag = np.linalg.norm(state.angular_velocity)
-                if vel_mag < _STABLE_VEL_MS and omega_mag < _STABLE_OMEGA_RPS:
-                    self._stable_count[i] += 1
-                else:
-                    self._stable_count[i] = 0
-                if not self._stabilized[i] and self._stable_count[i] >= _STABLE_STEPS:
-                    self._stabilized[i] = True
-                    self._logger.info(f'[VEHICLE] Drone {i} stabilized at '
-                          f't={SimulationContext.instance().current_time:.2f}s '
-                          f'— switching to real sensor data')
+            adapter = self.adapters[i]
+            adapter.update(state, dt, simulation_time)
 
-                baro_data = self.baro_sensors[i].update(state, dt)
-                mag_data = self.mag_sensors[i].update(state, dt)
-                if self._stabilized[i]:
-                    imu_data = self.imu_sensors[i].update(state, dt)
-                else:
-                    # Send ideal IMU: zero gyro, gravity-only accel in FRD (-g on Z)
-                    imu_data = {
-                        'angular_velocity': np.zeros(3),
-                        'linear_acceleration': np.array([0.0, 0.0, -9.80665]),
-                    }
-                self._last_imu[i] = imu_data
-                self._last_baro[i] = baro_data
-                self._last_mag[i] = mag_data
-
-                backend = self.backends[i]
-                backend.update_sensors(imu_data, baro_data, mag_data)
-
-                # --- 4. GPS at ~50 Hz (only in 'gps' mode; 'mocap' mode
-                #        relies on Isaac OmniGraph → ROS bridge → PX4) ---
-                if send_gps and self._sensor_params.localization_mode == 'gps':
-                    gps_data = self.gps_sensors[i].update(state, dt * self._gps_divider)
-                    backend.update_gps(gps_data)
-                    self._last_gps_vo[i] = gps_data
-
-                # --- 5. MAVLink update: send HIL data, receive motor commands ---
-                backend.update()
-                backend.send_ground_truth(state, backend.current_utime)
-
-            # --- 6. Compute forces/torques in body frame ---
-            motor_omega = backend.motor_commands  # (4,) [rad/s]
+            # --- 5. Compute forces/torques in body frame ---
+            motor_omega = adapter.motor_commands  # (4,) [rad/s]
             force_body, torque_body = self.dynamics[i].compute_forces_and_torques(
                 motor_omega, state
             )
 
-            # --- 7. Rotate body FLU -> world ENU ---
+            # --- 6. Rotate body FLU -> world ENU ---
             forces_world[i] = rot.apply(force_body)
             torques_world[i] = rot.apply(torque_body)
 
@@ -487,7 +371,7 @@ class DroneSimManager:
         if self._verbose:
             self._diag_counter += 1
             if (self._diag_counter % self._diag_divider) == 0:
-                self._print_diagnostics(positions_np, orientations_np, velocities_np, forces_world)
+                self._print_diagnostics(positions_np, velocities_np, forces_world)
 
     def record_loop_timing(self, t_begin: float, t_end: float) -> None:
         """Record wall-clock timing for a full simulation loop iteration."""
@@ -499,16 +383,7 @@ class DroneSimManager:
         """Record wall-clock timing for a single world.render() call."""
         self._render_durations.append((t_end - t_begin) * 1000.0)
 
-    def _print_diagnostics(self, positions_np, orientations_np, velocities_np,
-                           forces_world):
-        if self.autopilot == 'ardupilot':
-            for i, backend in enumerate(self.backends):
-                self._logger.info(
-                    f'[ARDUPILOT] drone{i} pos={positions_np[i]} '
-                    f'PWM demand={backend.raw_controls} omega={backend.motor_commands}')
-            return
-        b0 = self.backends[0]
-
+    def _print_diagnostics(self, positions_np, velocities_np, forces_world):
         # --- Loop timing stats ---
         loop_samples = list(self._loop_durations)
         self._loop_durations.clear()
@@ -527,34 +402,6 @@ class DroneSimManager:
             f'{self._t_last_loop_end:.6f}' if self._t_last_loop_end is not None else 'N/A'
         )
 
-        # --- PX4 latency stats ---
-        px4_stats = b0.px4_latency_stats
-        b0._px4_latency_samples.clear()
-        if px4_stats is not None:
-            p_avg, p_min, p_max = px4_stats
-            px4_str = f'avg={p_avg:.2f}ms  min={p_min:.2f}ms  max={p_max:.2f}ms'
-        else:
-            px4_str = 'N/A'
-        sensor_sent_str = (
-            f'{b0.t_last_sensor_sent_mono:.6f}'
-            if b0.t_last_sensor_sent_mono is not None else 'N/A'
-        )
-        actuator_recv_str = (
-            f'{b0.t_last_actuator_recv_mono:.6f}'
-            if b0.t_last_actuator_recv_mono is not None else 'N/A'
-        )
-
-        # --- Sync / realtime ratio ---
-        interval = b0.last_actuator_interval_ms
-        simdt = b0.last_actuator_simdt_us
-        offset = b0.time_sync_offset_us
-        rt_str = (
-            f'{(simdt / 1000.0) / interval:.2f}'
-            if (interval is not None and simdt is not None and interval > 0)
-            else 'N/A'
-        )
-        offset_str = f'{offset}µs' if offset is not None else 'N/A'
-
         render_samples = list(self._render_durations)
         self._render_durations.clear()
         if render_samples:
@@ -568,72 +415,22 @@ class DroneSimManager:
         self._logger.info(f'[DIAG t={SimulationContext.instance().current_time:.1f}s]')
         self._logger.info(f'  Loop  : {loop_str}  (begin={t_begin_str}  end={t_end_str})')
         self._logger.info(f'  Render: {render_str}')
-        self._logger.info(
-            f'  PX4  : {px4_str}  '
-            f'(sensor_sent={sensor_sent_str}  actuator_recv={actuator_recv_str})'
-        )
-        self._logger.info(f'  sync={offset_str}  rt={rt_str}')
-
-        for i, b in enumerate(self.backends):
-            ctrl = b.raw_controls
-            armed_flag = bool(b.raw_mode & 0x80)
-            pos = positions_np[i]
-            vz = velocities_np[i, 2]
-            qw, qx, qy, qz = orientations_np[i]
-            rpy = Rotation.from_quat([qx, qy, qz, qw]).as_euler(
-                'xyz', degrees=True)
-            imu = self._last_imu[i]
-            mag = self._last_mag[i]
-            baro = self._last_baro[i]
-            gps_vo = self._last_gps_vo[i]
-            av = imu.get('angular_velocity', [float('nan')] * 3)
-            la = imu.get('linear_acceleration', [float('nan')] * 3)
-            mf = mag.get('magnetic_field', [float('nan')] * 3)
+        for i, adapter in enumerate(self.adapters):
+            diagnostics = adapter.get_diagnostics()
+            state = self.states[i]
+            rpy = Rotation.from_quat(state.attitude).as_euler('xyz', degrees=True)
             self._logger.info(
-                f'  drone{i}: armed={armed_flag} mode=0x{b.raw_mode:02x} '
-                f'raw=[{ctrl[0]:.3f}, {ctrl[1]:.3f}, {ctrl[2]:.3f}, '
-                f'{ctrl[3]:.3f}] '
-                f'omega=[{b.motor_commands[0]:.0f}, {b.motor_commands[1]:.0f}, '
-                f'{b.motor_commands[2]:.0f}, {b.motor_commands[3]:.0f}] rad/s\n'
-                f'        pos=[{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}] m '
-                f'vz={vz:.3f} m/s '
-                f'rpy=[{rpy[0]:.1f}, {rpy[1]:.1f}, {rpy[2]:.1f}]°\n'
-                f'        Fz={forces_world[i][2]:.2f} N\n'
-                f'  [SENSORS] IMU gyro(FRD)=[{av[0]:.4f}, {av[1]:.4f}, {av[2]:.4f}] rad/s'
-                f'  accel(FRD)=[{la[0]:.3f}, {la[1]:.3f}, {la[2]:.3f}] m/s²\n'
-                f'  [SENSORS] Mag(FRD)=[{mf[0]:.4f}, {mf[1]:.4f}, {mf[2]:.4f}] Ga'
-                f'  Baro alt={baro.get("pressure_altitude", float("nan")):.2f} m'
-                f'  P={baro.get("absolute_pressure", float("nan")):.2f} hPa'
-            )
-            # Ground truth (mirrors send_ground_truth)
-            st = self.states[i]
-            att_ned_frd = st.get_attitude_ned_frd()
-            rpy_ned = Rotation.from_quat(att_ned_frd).as_euler('xyz', degrees=True)
-            vel_ned = st.get_linear_velocity_ned()
-            gps_d = self.backends[i]._gps_data
-            gt_lat = gps_d.get('latitude_gt', float('nan'))
-            gt_lon = gps_d.get('longitude_gt', float('nan'))
-            gt_alt = gps_d.get('altitude_gt', float('nan'))
-            self._logger.info(
-                f'  [GTRUTH] rpy(NED/FRD)=[{rpy_ned[0]:.2f}, {rpy_ned[1]:.2f},'
-                f'{rpy_ned[2]:.2f}]°'
-                f'  vel(NED)=[{vel_ned[0]:.3f}, {vel_ned[1]:.3f},'
-                f'{vel_ned[2]:.3f}] m/s\n'
-                f'  [GTRUTH] GPS gt: lat={gt_lat:.6f}° lon={gt_lon:.6f}°'
-                f' alt={gt_alt:.2f} m'
-            )
-
-            if gps_vo and self._sensor_params.localization_mode == 'gps':
-                self._logger.info(
-                    f'  [SENSORS] GPS lat={gps_vo.get("latitude", float("nan")):.6f}°'
-                    f'  lon={gps_vo.get("longitude", float("nan")):.6f}°'
-                    f'  alt={gps_vo.get("altitude", float("nan")):.2f} m'
-                    f'  vN={gps_vo.get("velocity_north", float("nan")):.3f}'
-                    f'  vE={gps_vo.get("velocity_east", float("nan")):.3f}'
-                    f'  vD={gps_vo.get("velocity_down", float("nan")):.3f} m/s'
-                    )
+                f'  {diagnostics.name} drone{i}: armed={diagnostics.armed} '
+                f'mode={diagnostics.mode} raw={diagnostics.raw_controls} '
+                f'omega={diagnostics.motor_commands} rad/s '
+                f'pos={positions_np[i]} vz={velocities_np[i, 2]:.3f} m/s '
+                f'rpy={rpy} deg Fz={forces_world[i, 2]:.2f} N')
+            if diagnostics.timing:
+                self._logger.info(f'  [TIMING] {diagnostics.timing}')
+            for sensor, data in diagnostics.sensors.items():
+                self._logger.info(f'  [SENSORS] {sensor}: {data}')
 
     def close(self):
-        """Close all MAVLink connections."""
-        for backend in self.backends:
-            backend.close()
+        """Close all autopilot adapters."""
+        for adapter in self.adapters:
+            adapter.close()

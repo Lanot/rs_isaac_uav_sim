@@ -11,7 +11,7 @@ import numpy as np
 
 import pytest
 
-from rs_isaac_uav_sim.sim.ardupilot_backend import ArduPilotJSON
+from rs_isaac_uav_sim.sim.autopilot.ardupilot.backend import ArduPilotJSON
 from rs_isaac_uav_sim.sim.config import ArduPilotParams, QuadrotorParams
 from rs_isaac_uav_sim.sim.state import VehicleState
 

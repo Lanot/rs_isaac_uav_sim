@@ -111,4 +111,4 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 The MAVLink HIL backend is ported from
 [PegasusSimulator](https://github.com/PegasusSimulator/PegasusSimulator)
 (BSD-3-Clause, © Marcelo Jacinto), credited inline at the top of
-`rs_isaac_uav_sim/sim/mavlink_backend.py`.
+`rs_isaac_uav_sim/sim/autopilot/px4/backend.py`.
