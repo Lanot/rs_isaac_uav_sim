@@ -23,6 +23,7 @@ import time
 # ---------------------------------------------------------------------------
 parser = argparse.ArgumentParser(
     description='MAVLink multi-drone simulator (Isaac Sim 6.0)')
+parser.add_argument('--autopilot', choices=['px4', 'ardupilot'], default='px4')
 parser.add_argument('--num_drones', type=int, default=1,
                     help='Number of drones (default: 1)')
 parser.add_argument('--headless', action='store_true', help='Run without GUI')
@@ -335,6 +336,8 @@ def main():
         positions = None
         scene_camera_view = None
 
+    ardupilot_params = cfg['ardupilot'] if args.config else None
+
     # Override connection params from CLI and derive num_rotors from config
     mavlink_params.base_port = args.base_port
     mavlink_params.connection_ip = args.connection_ip
@@ -350,11 +353,14 @@ def main():
     print(f'  Config     : {args.config if args.config else "(defaults)"}')
     print(f'  Physics dt : {physics_dt*1000:.1f} ms  '
           f'({MAVLINK_UPDATE_RATE:.0f} Hz)')
-    print(
-        f'  MAVLink    : TCP ports '
-        f'{mavlink_params.base_port + 1} – '
-        f'{mavlink_params.base_port + args.num_drones}'
-    )
+    if args.autopilot == 'px4':
+        print(
+            f'  MAVLink    : TCP ports '
+            f'{mavlink_params.base_port + 1} – '
+            f'{mavlink_params.base_port + args.num_drones}'
+        )
+    else:
+        print('  Autopilot  : ArduPilot JSON (UDP settings from YAML)')
     print(f'{"="*70}\n')
 
     world = World(
@@ -379,103 +385,110 @@ def main():
         mavlink_params=mavlink_params,
         gps_origin=gps_origin,
         verbose=args.verbose,
+        autopilot=args.autopilot,
+        ardupilot_params=ardupilot_params,
     )
 
-    # Spawn USD drone assets into the stage (computes default grid positions)
-    manager.spawn_drones(world, positions)
+    try:
+        # Spawn USD drone assets into the stage (computes default grid positions)
+        manager.spawn_drones(world, positions)
 
-    # Reset world — initialises physics context and USD stage
-    world.reset()
+        # Reset world — initialises physics context and USD stage
+        world.reset()
 
-    if scene_camera_view is not None and not args.headless:
-        from isaacsim.core.utils.viewports import set_camera_view
+        if scene_camera_view is not None and not args.headless:
+            from isaacsim.core.utils.viewports import set_camera_view
 
-        set_camera_view(
-            eye=scene_camera_view['eye'],
-            target=scene_camera_view['target'],
-        )
-
-    # Initialise GPU tensor views and connect MAVLink
-    manager.initialize()
-
-    # Optional ROS 2 bridge OmniGraph: native /clock + per-drone
-    # nav_msgs/Odometry publishing via the Isaac Sim ROS 2 Bridge
-    # extension. Replaces the clock_from_px4 + UDP-ground-truth path
-    # with a single OmniGraph driven by the simulation playback tick,
-    # which is both simpler and cache-warmer than the two-process
-    # shim (no rclpy context living inside Carb).
-    if args.ros2_namespaces:
-        ros2_ns_list = [
-            ns.strip() for ns in args.ros2_namespaces.split(',') if ns.strip()
-        ]
-        if len(ros2_ns_list) != args.num_drones:
-            raise SystemExit(
-                f'[ROS2 BRIDGE] --ros2_namespaces has '
-                f'{len(ros2_ns_list)} entries but --num_drones={args.num_drones}; '
-                f'these must match.'
+            set_camera_view(
+                eye=scene_camera_view['eye'],
+                target=scene_camera_view['target'],
             )
-        bridge_graph_path = _setup_ros2_bridge_graph(namespaces, ros2_ns_list)
-        # Keep a global reference so the main loop can push-evaluate
-        # the graph on every world.step(). The ONDEMAND pipeline stage
-        # means Isaac will only evaluate the graph when we tell it to,
-        # which is exactly what we want to lock mocap publishing to
-        # the physics rate (500 Hz) without paying for a full
-        # simulation_app.update() every tick.
-        import omni.timeline
-        omni.timeline.get_timeline_interface().play()
-        print('[ROS2 BRIDGE] Timeline started '
-              '(required for OnPhysicsStep to fire).')
-    else:
-        bridge_graph_path = None
 
-    print('\n[READY] Simulation running. Start PX4 SITL instances now.')
-    print(
-        f'[INFO]  Connect PX4 to TCP ports '
-        f'{mavlink_params.base_port + 1} – '
-        f'{mavlink_params.base_port + args.num_drones}\n'
-    )
+        # Initialise GPU tensor views and connect MAVLink
+        manager.initialize()
 
-    # Render divider: world.render() is expensive — limit to 50 Hz even though
-    # physics runs at 500 Hz. This reduces GPU stall cost 10×.
-    _render_every_n = max(1, round(MAVLINK_UPDATE_RATE / 50.0))
-    _render_step = 0
+        # Optional ROS 2 bridge OmniGraph: native /clock + per-drone
+        # nav_msgs/Odometry publishing via the Isaac Sim ROS 2 Bridge
+        # extension. Replaces the clock_from_px4 + UDP-ground-truth path
+        # with a single OmniGraph driven by the simulation playback tick,
+        # which is both simpler and cache-warmer than the two-process
+        # shim (no rclpy context living inside Carb).
+        if args.ros2_namespaces:
+            ros2_ns_list = [
+                ns.strip() for ns in args.ros2_namespaces.split(',') if ns.strip()
+            ]
+            if len(ros2_ns_list) != args.num_drones:
+                raise SystemExit(
+                    f'[ROS2 BRIDGE] --ros2_namespaces has '
+                    f'{len(ros2_ns_list)} entries but --num_drones={args.num_drones}; '
+                    f'these must match.'
+                )
+            bridge_graph_path = _setup_ros2_bridge_graph(namespaces, ros2_ns_list)
+            # Keep a global reference so the main loop can push-evaluate
+            # the graph on every world.step(). The ONDEMAND pipeline stage
+            # means Isaac will only evaluate the graph when we tell it to,
+            # which is exactly what we want to lock mocap publishing to
+            # the physics rate (500 Hz) without paying for a full
+            # simulation_app.update() every tick.
+            import omni.timeline
+            omni.timeline.get_timeline_interface().play()
+            print('[ROS2 BRIDGE] Timeline started '
+                  '(required for OnPhysicsStep to fire).')
+        else:
+            bridge_graph_path = None
 
-    # When the ROS 2 bridge OmniGraph is active we push-evaluate the
-    # graph directly after every world.step() via og.Controller.
-    # evaluate_sync. This locks mocap publishing to the physics rate
-    # (500 Hz) — equivalent to the UDP broadcaster's cadence — and
-    # avoids the per-tick overhead of simulation_app.update() (which
-    # also processes render/event queues we don't care about in
-    # headless MAVLink HIL).
-    if bridge_graph_path is not None:
-        import omni.graph.core as _og
+        print(f'\n[READY] Simulation running. Autopilot: {args.autopilot}')
+        if args.autopilot == 'px4':
+            print(
+                f'[INFO]  Connect PX4 to TCP ports '
+                f'{mavlink_params.base_port + 1} – '
+                f'{mavlink_params.base_port + args.num_drones}\n'
+            )
 
-        def _evaluate_bridge(_p=bridge_graph_path):
-            _og.Controller.evaluate_sync(_p)
-    else:
-        _evaluate_bridge = None
+        # Render divider: world.render() is expensive — limit to 50 Hz even though
+        # physics runs at 500 Hz. This reduces GPU stall cost 10×.
+        _render_every_n = max(1, round(MAVLINK_UPDATE_RATE / 50.0))
+        _render_step = 0
 
-    while simulation_app.is_running():
-        t_loop_begin = time.monotonic()
-        manager.step(physics_dt)
-        world.step(render=False)
-        if _evaluate_bridge is not None:
-            _evaluate_bridge()
-        if not args.headless:
-            _render_step += 1
-            if _render_step >= _render_every_n:
-                t_render_begin = time.monotonic()
-                world.render()
-                t_render_end = time.monotonic()
-                manager.record_render_timing(t_render_begin, t_render_end)
-                _render_step = 0
-        t_loop_end = time.monotonic()
-        manager.record_loop_timing(t_loop_begin, t_loop_end)
+        # When the ROS 2 bridge OmniGraph is active we push-evaluate the
+        # graph directly after every world.step() via og.Controller.
+        # evaluate_sync. This locks mocap publishing to the physics rate
+        # (500 Hz) — equivalent to the UDP broadcaster's cadence — and
+        # avoids the per-tick overhead of simulation_app.update() (which
+        # also processes render/event queues we don't care about in
+        # headless MAVLink HIL).
+        if bridge_graph_path is not None:
+            import omni.graph.core as _og
 
-    print('\n[SHUTDOWN] Closing simulation...')
-    manager.close()
-    simulation_app.close()
+            def _evaluate_bridge(_p=bridge_graph_path):
+                _og.Controller.evaluate_sync(_p)
+        else:
+            _evaluate_bridge = None
+
+        while simulation_app.is_running():
+            t_loop_begin = time.monotonic()
+            manager.step(physics_dt)
+            world.step(render=False)
+            if _evaluate_bridge is not None:
+                _evaluate_bridge()
+            if not args.headless:
+                _render_step += 1
+                if _render_step >= _render_every_n:
+                    t_render_begin = time.monotonic()
+                    world.render()
+                    t_render_end = time.monotonic()
+                    manager.record_render_timing(t_render_begin, t_render_end)
+                    _render_step = 0
+            t_loop_end = time.monotonic()
+            manager.record_loop_timing(t_loop_begin, t_loop_end)
+
+        print('\n[SHUTDOWN] Closing simulation...')
+    finally:
+        manager.close()
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    finally:
+        simulation_app.close()

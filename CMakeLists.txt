@@ -8,6 +8,7 @@ ament_python_install_package(${PROJECT_NAME})
 
 install(PROGRAMS
   isaac_run/scene_mavlink_sim.py
+  scripts/ardupilot_flight_check.py
   scripts/live_flight_demo.py
   scripts/mocap_rate_limiter
   DESTINATION lib/${PROJECT_NAME}
@@ -51,6 +52,15 @@ if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(pyright test/lint/test_pyright.py
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  )
+
+  ament_add_pytest_test(test_ardupilot_json test/unit/test_ardupilot_json.py
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  )
+
+  ament_add_pytest_test(test_ardupilot_sitl_json test/integration/test_ardupilot_sitl_json.py
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    TIMEOUT 60
   )
 
   ament_add_pytest_test(test_state_rotations test/unit/test_state_rotations.py

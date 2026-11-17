@@ -78,6 +78,11 @@ ros2 launch rs_isaac_uav_sim px4_sitl.launch.py num_drones:=1
 ros2 launch rs_isaac_uav_sim scene_mavlink_sim.py num_drones:=1
 ```
 
+## ArduPilot SITL (experimental)
+
+A separate JSON/UDP backend, Quad-X profile and ROS 2 launcher are available.
+See [ArduPilot setup and limitations](docs/ardupilot.md). PX4 remains the default.
+
 ## Tests
 
 ```bash

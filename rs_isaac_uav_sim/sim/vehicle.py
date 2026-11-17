@@ -25,6 +25,7 @@ from isaacsim.core.api import SimulationContext
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from .ardupilot_backend import ArduPilotJSON
 from .config import GPSOrigin, MAVLINK_UPDATE_RATE, MavlinkParams, QuadrotorParams, SensorParams
 from .dynamics import QuadrotorDynamics
 from .mavlink_backend import PX4MavlinkHIL
@@ -92,9 +93,16 @@ class DroneSimManager:
         mavlink_params: Optional[MavlinkParams] = None,
         gps_origin: Optional[GPSOrigin] = None,
         verbose: bool = False,
+        autopilot: str = 'px4',
+        ardupilot_params=None,
     ):
         self._logger = get_logger(self.__class__.__name__)
 
+        if autopilot not in ('px4', 'ardupilot'):
+            raise ValueError(f'Unsupported autopilot: {autopilot}')
+        self.autopilot = autopilot
+        if autopilot == 'ardupilot' and sensor_params and sensor_params.localization_mode != 'gps':
+            raise ValueError('ArduPilot mocap mode is not implemented')
         self.namespaces = namespaces
         self._verbose = verbose
         self.num_drones = len(namespaces)
@@ -129,15 +137,22 @@ class DroneSimManager:
             ]
         else:
             self.gps_sensors = []
-        self.backends = [
-            PX4MavlinkHIL(
-                vehicle_id=i + 1, params=self.mavlink_params,
-                quad_params=self.quad_params,
-                localization_mode=loc,
-                verbose=self._verbose,
-            )
-            for i in range(self.num_drones)
-        ]
+        self.backends: list[Any]
+        if self.autopilot == 'ardupilot':
+            self.backends = [
+                ArduPilotJSON(i + 1, ardupilot_params, self.quad_params)
+                for i in range(self.num_drones)
+            ]
+        else:
+            self.backends = [
+                PX4MavlinkHIL(
+                    vehicle_id=i + 1, params=self.mavlink_params,
+                    quad_params=self.quad_params,
+                    localization_mode=loc,
+                    verbose=self._verbose,
+                )
+                for i in range(self.num_drones)
+            ]
 
         # GPU tensor views — initialized after world.reset()
         self._prims = None        # Articulation view (sleep threshold only)
@@ -320,6 +335,9 @@ class DroneSimManager:
 
         for backend in self.backends:
             backend.connect()
+            if self.autopilot == 'ardupilot':
+                self._logger.info(f'[VEHICLE] ArduPilot JSON listening on UDP {backend.port}')
+                continue
             self._logger.info(f'[VEHICLE] MAVLink vehicle {backend._vehicle_id} '
                   f'listening on TCP port {backend.port}')
             self._logger.info(f'[VEHICLE] Waiting for PX4 heartbeat on vehicle {backend._vehicle_id}...')
@@ -393,47 +411,51 @@ class DroneSimManager:
             rot = Rotation.from_quat(state.attitude)
             state.angular_velocity = rot.inv().apply(velocities_np[i, 3:])
 
-            # --- 3. Update sensors ---
-            # Detect stability: wait for the drone to settle after spawn drop
-            vel_mag = np.linalg.norm(state.linear_velocity)
-            omega_mag = np.linalg.norm(state.angular_velocity)
-            if vel_mag < _STABLE_VEL_MS and omega_mag < _STABLE_OMEGA_RPS:
-                self._stable_count[i] += 1
-            else:
-                self._stable_count[i] = 0
-            if not self._stabilized[i] and self._stable_count[i] >= _STABLE_STEPS:
-                self._stabilized[i] = True
-                self._logger.info(f'[VEHICLE] Drone {i} stabilized at '
-                      f't={SimulationContext.instance().current_time:.2f}s '
-                      f'— switching to real sensor data')
-
-            baro_data = self.baro_sensors[i].update(state, dt)
-            mag_data = self.mag_sensors[i].update(state, dt)
-            if self._stabilized[i]:
-                imu_data = self.imu_sensors[i].update(state, dt)
-            else:
-                # Send ideal IMU: zero gyro, gravity-only accel in FRD (-g on Z)
-                imu_data = {
-                    'angular_velocity': np.zeros(3),
-                    'linear_acceleration': np.array([0.0, 0.0, -9.80665]),
-                }
-            self._last_imu[i] = imu_data
-            self._last_baro[i] = baro_data
-            self._last_mag[i] = mag_data
-
             backend = self.backends[i]
-            backend.update_sensors(imu_data, baro_data, mag_data)
+            if self.autopilot == 'ardupilot':
+                backend.exchange(state, SimulationContext.instance().current_time, dt)
+            else:
+                # --- 3. Update sensors ---
+                # Detect stability: wait for the drone to settle after spawn drop
+                vel_mag = np.linalg.norm(state.linear_velocity)
+                omega_mag = np.linalg.norm(state.angular_velocity)
+                if vel_mag < _STABLE_VEL_MS and omega_mag < _STABLE_OMEGA_RPS:
+                    self._stable_count[i] += 1
+                else:
+                    self._stable_count[i] = 0
+                if not self._stabilized[i] and self._stable_count[i] >= _STABLE_STEPS:
+                    self._stabilized[i] = True
+                    self._logger.info(f'[VEHICLE] Drone {i} stabilized at '
+                          f't={SimulationContext.instance().current_time:.2f}s '
+                          f'— switching to real sensor data')
 
-            # --- 4. GPS at ~50 Hz (only in 'gps' mode; 'mocap' mode
-            #        relies on Isaac OmniGraph → ROS bridge → PX4) ---
-            if send_gps and self._sensor_params.localization_mode == 'gps':
-                gps_data = self.gps_sensors[i].update(state, dt * self._gps_divider)
-                backend.update_gps(gps_data)
-                self._last_gps_vo[i] = gps_data
+                baro_data = self.baro_sensors[i].update(state, dt)
+                mag_data = self.mag_sensors[i].update(state, dt)
+                if self._stabilized[i]:
+                    imu_data = self.imu_sensors[i].update(state, dt)
+                else:
+                    # Send ideal IMU: zero gyro, gravity-only accel in FRD (-g on Z)
+                    imu_data = {
+                        'angular_velocity': np.zeros(3),
+                        'linear_acceleration': np.array([0.0, 0.0, -9.80665]),
+                    }
+                self._last_imu[i] = imu_data
+                self._last_baro[i] = baro_data
+                self._last_mag[i] = mag_data
 
-            # --- 5. MAVLink update: send HIL data, receive motor commands ---
-            backend.update()
-            backend.send_ground_truth(state, backend.current_utime)
+                backend = self.backends[i]
+                backend.update_sensors(imu_data, baro_data, mag_data)
+
+                # --- 4. GPS at ~50 Hz (only in 'gps' mode; 'mocap' mode
+                #        relies on Isaac OmniGraph → ROS bridge → PX4) ---
+                if send_gps and self._sensor_params.localization_mode == 'gps':
+                    gps_data = self.gps_sensors[i].update(state, dt * self._gps_divider)
+                    backend.update_gps(gps_data)
+                    self._last_gps_vo[i] = gps_data
+
+                # --- 5. MAVLink update: send HIL data, receive motor commands ---
+                backend.update()
+                backend.send_ground_truth(state, backend.current_utime)
 
             # --- 6. Compute forces/torques in body frame ---
             motor_omega = backend.motor_commands  # (4,) [rad/s]
@@ -479,6 +501,12 @@ class DroneSimManager:
 
     def _print_diagnostics(self, positions_np, orientations_np, velocities_np,
                            forces_world):
+        if self.autopilot == 'ardupilot':
+            for i, backend in enumerate(self.backends):
+                self._logger.info(
+                    f'[ARDUPILOT] drone{i} pos={positions_np[i]} '
+                    f'PWM demand={backend.raw_controls} omega={backend.motor_commands}')
+            return
         b0 = self.backends[0]
 
         # --- Loop timing stats ---

@@ -1,0 +1,51 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________ TestPX4SitlTakeoff.test_arm_and_takeoff ____________________
+
+self = <test_px4_sitl_takeoff.TestPX4SitlTakeoff testMethod=test_arm_and_takeoff>
+
+    def test_arm_and_takeoff(self):
+        # Connect GCS to PX4 (120s budget covers Isaac Sim + PX4 boot + HIL link)
+        gcs = self._connect_gcs(timeout=120)
+    
+        # Confirm initial heartbeat was received
+        hb = gcs.get_px4_heartbeat()
+        self.assertIsNotNone(hb, 'No HEARTBEAT received from PX4')
+    
+        # Wait for LOCAL_POSITION_NED to appear (EKF converged, GPS lock)
+        ready = _wait_for_position(gcs, timeout=90.0)
+        self.assertIsNotNone(
+            ready,
+            'No LOCAL_POSITION_NED from PX4 within 90s (EKF not converged)'
+        )
+    
+        # Wait for PX4 to report MAV_STATE_STANDBY (all arming checks passed)
+        standby = _wait_for_ready_to_arm(gcs, timeout=60.0)
+        self.assertTrue(standby, 'PX4 did not reach STANDBY state within 60s')
+    
+        # Arm, then immediately switch to AUTO.TAKEOFF
+        gcs.arm()
+        time.sleep(0.2)
+        gcs.set_mode_auto_takeoff()
+    
+        armed = _wait_for_armed(gcs, timeout=30.0)
+        self.assertTrue(
+            armed,
+            'PX4 did not report armed state within 30s after ARM command',
+        )
+    
+        # --- Wait for climb: LOCAL_POSITION_NED z < -2.0 (NED, negative = up) ---
+        pos = _wait_for_altitude(gcs, z_threshold=-2.0, timeout=30.0)
+    
+        self.assertIsNotNone(pos, 'No LOCAL_POSITION_NED received from PX4')
+>       self.assertLess(
+            pos['z'],
+            -2.0,
+            f"Drone did not climb to 2m (z < -2.0 NED). Got z={pos['z']:.3f}m",
+        )
+E       AssertionError: 0.13675521314144135 not less than -2.0 : Drone did not climb to 2m (z < -2.0 NED). Got z=0.137m
+
+test/integration/test_px4_sitl_takeoff.py:313: AssertionError
+=========================== short test summary info ============================
+FAILED test/integration/test_px4_sitl_takeoff.py::TestPX4SitlTakeoff::test_arm_and_takeoff
+1 failed in 47.66s

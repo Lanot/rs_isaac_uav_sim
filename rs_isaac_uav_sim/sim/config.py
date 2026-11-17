@@ -224,6 +224,37 @@ class GPSOrigin:
         )
 
 
+@dataclass
+class ArduPilotParams:
+    """ArduPilot JSON transport; output channels use zero-based indices."""
+
+    bind_ip: str = '127.0.0.1'
+    base_port: int = 9002
+    port_stride: int = 10
+    timeout: float = 15.0
+    pwm_min: int = 1000
+    pwm_max: int = 2000
+    motor_channels: list = field(default_factory=lambda: [0, 1, 2, 3])
+
+    def __post_init__(self):
+        """Validate channel mapping and transport bounds."""
+        if not 0 <= self.base_port <= 65535 or self.port_stride < 1:
+            raise ValueError('Invalid ArduPilot UDP port or stride')
+        if not np.isfinite(self.timeout) or self.timeout <= 0:
+            raise ValueError('ArduPilot timeout must be positive and finite')
+        if not 0 < self.pwm_min < self.pwm_max <= 65535:
+            raise ValueError('Require 0 < pwm_min < pwm_max <= 65535')
+        if (len(self.motor_channels) != 4 or len(set(self.motor_channels)) != 4
+                or any(type(c) is not int or not 0 <= c < 32
+                       for c in self.motor_channels)):
+            raise ValueError('motor_channels must contain four distinct indices in [0, 31]')
+
+    @classmethod
+    def from_dict(cls, data):
+        """Load transport settings from YAML, rejecting misspelled keys."""
+        return cls(**data)
+
+
 def load_config_from_yaml(yaml_path: str) -> Dict[str, Any]:
     """
     Read a YAML config file and return populated config dataclass instances.
@@ -239,6 +270,7 @@ def load_config_from_yaml(yaml_path: str) -> Dict[str, Any]:
         data: Dict[str, Any] = loaded_data if isinstance(loaded_data, dict) else {}
 
     return {
+        'ardupilot': ArduPilotParams.from_dict(data.get('ardupilot', {})),
         'quadrotor': QuadrotorParams.from_dict(data.get('quadrotor', {})),
         'sensor': SensorParams.from_dict(data.get('sensor', {})),
         'mavlink': MavlinkParams.from_dict(data.get('mavlink', {})),

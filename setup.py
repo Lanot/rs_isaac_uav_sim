@@ -12,12 +12,15 @@ setup(
         ('share/' + package_name + '/launch', [
             'launch/scene_mavlink_sim.py',
             'launch/px4_sitl.launch.py',
+            'launch/ardupilot_sitl.launch.py',
         ]),
         ('share/' + package_name + '/config', [
             'config/default.yaml',
             'config/px4_iris.yaml',
+            'config/ardupilot_quad_x.yaml',
+            'config/ardupilot_quad_x.parm',
         ]),
-        ('lib/' + package_name, ['scripts/scene_mavlink_sim.py']),
+        ('lib/' + package_name, ['isaac_run/scene_mavlink_sim.py']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

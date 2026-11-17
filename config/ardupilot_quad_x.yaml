@@ -1,0 +1,35 @@
+# Copyright 2026 ROBOTSIX
+# SPDX-License-Identifier: Apache-2.0
+# Symmetric Quad-X in ArduCopter motor order, FLU body coordinates.
+# Motor 1 front-right CCW, 2 rear-left CCW, 3 front-left CW, 4 rear-right CW.
+# A dedicated geometry avoids the PX4 Iris profile's asymmetric front/rear arms.
+quadrotor:
+  mass: 1.52
+  inertia: [0.029125, 0.029125, 0.055225]
+  rotor_positions:
+    - [0.20, -0.20, 0.022]
+    - [-0.20, 0.20, 0.022]
+    - [0.20, 0.20, 0.022]
+    - [-0.20, -0.20, 0.022]
+  rot_dirs: [-1, -1, 1, 1]
+  ct: 5.84e-06
+  cq: 3.504e-07
+  omega_min: 0.0
+  omega_max: 1100.0
+  drag: [0.0, 0.0, 0.0]
+  thr_mdl_fac: 1.0
+  usd_asset: iris_quadrotor/iris_quadrotor.usda
+sensor:
+  localization_mode: gps
+ardupilot:
+  bind_ip: 127.0.0.1
+  base_port: 9002
+  port_stride: 10
+  timeout: 15.0
+  pwm_min: 1000
+  pwm_max: 2000
+  motor_channels: [0, 1, 2, 3]
+gps_origin:
+  lat: 47.24926
+  lon: -1.54844
+  alt: 0.0

@@ -1,0 +1,19 @@
+# Copyright 2026 ROBOTSIX
+# SPDX-License-Identifier: Apache-2.0
+# Pair with ardupilot_quad_x.yaml and a fresh SITL state directory.
+FRAME_CLASS 1
+FRAME_TYPE 1
+SERVO1_FUNCTION 33
+SERVO2_FUNCTION 34
+SERVO3_FUNCTION 35
+SERVO4_FUNCTION 36
+MOT_PWM_TYPE 0
+MOT_PWM_MIN 1000
+MOT_PWM_MAX 2000
+MOT_THST_EXPO 1.0
+MOT_SPIN_ARM 0.10
+MOT_SPIN_MIN 0.15
+MOT_SPIN_MAX 1.0
+SIM_RATE_HZ 500
+# Keep gyro samples above ArduCopter arming requirement: 500 >= 1.8 * 250.
+SCHED_LOOP_RATE 250
