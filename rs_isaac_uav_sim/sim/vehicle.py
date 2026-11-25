@@ -58,7 +58,7 @@ _BASE_LINK_SUFFIX = '/Geometry/base_link'
 # Stability detection: hold ideal IMU data until the drone settles on the ground
 _STABLE_VEL_MS = 0.05       # m/s  — linear velocity magnitude threshold
 _STABLE_OMEGA_RPS = 0.05    # rad/s — angular velocity magnitude threshold
-_STABLE_STEPS = int(0.5 * MAVLINK_UPDATE_RATE)  # consecutive steps required
+_STABLE_DURATION = 0.5     # consecutive simulation seconds required
 
 
 class DroneSimManager:
@@ -95,12 +95,14 @@ class DroneSimManager:
         gps_origin: Optional[GPSOrigin] = None,
         verbose: bool = False,
         direct_tensors: bool = False,
+        physics_hz: float = MAVLINK_UPDATE_RATE,
     ):
         self._logger = get_logger(self.__class__.__name__)
 
         self.namespaces = namespaces
         self._verbose = verbose
         self.num_drones = len(namespaces)
+        self._configure_physics_rate(physics_hz)
         self.quad_params = quad_params or QuadrotorParams()
         self.sensor_params = sensor_params or SensorParams()
         self._sensor_params = self.sensor_params
@@ -156,7 +158,6 @@ class DroneSimManager:
 
         # GPS divider: send GPS at ~50 Hz
         self._gps_counter = 0
-        self._gps_divider = max(1, round(MAVLINK_UPDATE_RATE / 50.0))
 
         # Last sensor readings for diagnostics (one dict per drone)
         self._last_imu: list = [{}] * self.num_drones
@@ -166,19 +167,28 @@ class DroneSimManager:
 
         # Diagnostic divider: print at ~1 Hz
         self._diag_counter = 0
-        self._diag_divider = max(1, round(MAVLINK_UPDATE_RATE / 1.0))
 
         # Per-drone stability tracking (drone drops a few cm at spawn)
         self._stable_count: list = [0] * self.num_drones
         self._stabilized: list = [False] * self.num_drones
 
         # Loop timing tracking (populated by record_loop_timing)
-        self._loop_durations: collections.deque = collections.deque(maxlen=500)
+        self._loop_durations: collections.deque = collections.deque(
+            maxlen=max(1, math.ceil(self.physics_hz)))
         self._t_last_loop_begin: float | None = None
         self._t_last_loop_end: float | None = None
 
         # Render timing tracking (populated by record_render_timing; GUI only)
         self._render_durations: collections.deque = collections.deque(maxlen=100)
+
+    def _configure_physics_rate(self, physics_hz: float):
+        """Keep sensor dividers and stabilization duration tied to physics time."""
+        if not math.isfinite(physics_hz) or physics_hz <= 0:
+            raise ValueError('physics_hz must be finite and positive')
+        self.physics_hz = float(physics_hz)
+        self._gps_divider = max(1, round(self.physics_hz / 50.0))
+        self._diag_divider = max(1, round(self.physics_hz))
+        self._stable_steps = max(1, math.ceil(_STABLE_DURATION * self.physics_hz))
 
     @staticmethod
     def _grid_positions(num_drones: int, spacing: float = 2.0,
@@ -420,7 +430,7 @@ class DroneSimManager:
                 self._stable_count[i] += 1
             else:
                 self._stable_count[i] = 0
-            if not self._stabilized[i] and self._stable_count[i] >= _STABLE_STEPS:
+            if not self._stabilized[i] and self._stable_count[i] >= self._stable_steps:
                 self._stabilized[i] = True
                 self._logger.info(f'[VEHICLE] Drone {i} stabilized at '
                       f't={SimulationContext.instance().current_time:.2f}s '

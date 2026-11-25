@@ -157,7 +157,7 @@ def test_cpu_step_preserves_frame_conversion_and_owns_state_snapshot(profile, di
         _tensor_io=DirectTensorIO(view, torch, 'cpu', 1) if direct else None,
         profiler=SimulationProfiler(0.0, 0.002) if profile else None,
         _gps_counter=0, _gps_divider=10, states=[state],
-        _stable_count=[0], _stabilized=[True], baro_sensors=[sensor],
+        _stable_count=[0], _stable_steps=250, _stabilized=[True], baro_sensors=[sensor],
         mag_sensors=[sensor], imu_sensors=[sensor], _last_imu=[{}],
         _last_baro=[{}], _last_mag=[{}], backends=[backend], dynamics=[dynamics],
         _sensor_params=SimpleNamespace(localization_mode='mocap'),
@@ -183,7 +183,8 @@ def test_launch_forwards_selected_device_and_profiling(filename, monkeypatch):
     import os
     from pathlib import Path
 
-    settings = {'physics_device': 'cpu', 'profile': 'true', 'render_quality': 'fast',
+    settings = {'physics_device': 'cpu', 'physics_hz': '250',
+                'profile': 'true', 'render_quality': 'fast',
                 'direct_tensors': 'true', 'physics_threads': '0',
                 'num_drones': '0', 'headless': 'true', 'config_file': '', 'world_usd': '',
                 'base_port': '4560', 'connection_ip': 'localhost', 'verbose': 'false',
@@ -208,6 +209,7 @@ def test_launch_forwards_selected_device_and_profiling(filename, monkeypatch):
     actions = namespace['_launch_setup'](None)
     command = actions[0]['cmd']
     assert command[command.index('--physics_device') + 1] == 'cpu'
+    assert command[command.index('--physics_hz') + 1] == '250'
     assert command[command.index('--render_quality') + 1] == 'fast'
     assert '--profile' in command
     assert '--direct_tensors' in command
@@ -258,3 +260,63 @@ def test_direct_tensor_io_reuses_buffers_and_preserves_multiple_body_order():
     assert submissions[-1]['indices'].tolist() == [0, 1]
     with pytest.raises(RuntimeError, match='configured drone count'):
         DirectTensorIO(SimpleNamespace(_physics_view=native), torch, 'cpu', 3)
+
+
+@pytest.mark.parametrize('hz,gps_divider,stable_steps',
+                         [(500, 10, 250), (250, 5, 125), (240, 5, 120), (25, 1, 13)])
+def test_selected_physics_rate_updates_sensor_and_stability_scheduling(
+        hz, gps_divider, stable_steps):
+    """Rate changes retain roughly 50 Hz GPS and half a second of stability."""
+    import ast
+    import math
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    source = Path(__file__).resolve().parents[2] / 'rs_isaac_uav_sim/sim/vehicle.py'
+    tree = ast.parse(source.read_text())
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef))
+    method = next(node for node in cls.body if isinstance(node, ast.FunctionDef)
+                  and node.name == '_configure_physics_rate')
+    namespace = {'math': math, '_STABLE_DURATION': 0.5}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), 'exec'), namespace)
+    manager = SimpleNamespace()
+    namespace['_configure_physics_rate'](manager, hz)
+    assert manager.physics_hz == hz
+    assert manager._gps_divider == gps_divider
+    assert manager._diag_divider == hz
+    assert manager._stable_steps == stable_steps
+    for invalid in (0, -1, float('nan'), float('inf')):
+        with pytest.raises(ValueError):
+            namespace['_configure_physics_rate'](manager, invalid)
+
+
+@pytest.mark.parametrize('device,hz', [('cuda', 250), ('cpu', 500)])
+def test_simulation_manager_receives_selected_device_and_dt(device, hz, capsys):
+    """Use the real setup function with a fake manager instead of booting Kit."""
+    import ast
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    source = Path(__file__).resolve().parents[2] / 'isaac_run/scene_mavlink_sim.py'
+    tree = ast.parse(source.read_text())
+    method = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                  and node.name == 'setup_physics_scene')
+    configured = []
+    attributes = {}
+    native = SimpleNamespace(
+        setup_simulation=lambda **kwargs: configured.append(kwargs),
+        get_device=lambda: 'cuda:0' if device == 'cuda' else 'cpu')
+    prim = SimpleNamespace(CreateAttribute=lambda name, dtype:
+                           SimpleNamespace(Set=lambda value: attributes.update({name: value})))
+    world = SimpleNamespace(
+        get_physics_context=lambda: SimpleNamespace(prim_path='/World/PhysicsScene'),
+        stage=SimpleNamespace(GetPrimAtPath=lambda path: prim))
+    sdf = SimpleNamespace(ValueTypeNames=SimpleNamespace(Bool=bool))
+    namespace = {'args': SimpleNamespace(physics_device=device, physics_hz=hz),
+                 'SimulationManager': native, 'Sdf': sdf}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), 'exec'), namespace)
+    namespace['setup_physics_scene'](world)
+    assert configured == [{'dt': 1.0 / hz, 'device': device}]
+    assert attributes['physxScene:enableDirectGpuAccess'] == (device == 'cuda')
+    assert attributes['physxScene:enableGpuArticulations'] == (device == 'cuda')
+    assert 'Physics device:' in capsys.readouterr().out

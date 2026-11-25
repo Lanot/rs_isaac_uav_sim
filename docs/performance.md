@@ -1,6 +1,6 @@
 # Measuring and improving real-time factor
 
-The simulator advances physics and MAVLink sensors at 500 Hz. Each physics step
+By default the simulator advances physics and MAVLink sensors at 500 Hz. Each physics step
 has a 2 ms wall-time budget for real-time execution. Rendering runs every ten
 steps (50 Hz in simulation time); a ROS bridge graph, when requested, is evaluated
 on every physics step. A 500 Hz graph can be a substantial cost even when only
@@ -147,3 +147,43 @@ Compare stable `vehicle.readback`, `vehicle.force_submit`, `vehicle.step` and
 themselves guarantee RTF 1.0. Tracy/Nsight profiling or simplifying the drone's
 physical articulation is then the next investigation, with separate fidelity
 checks before adopting a simpler physical model.
+
+## Selecting the simulation rate through SimulationManager
+
+`physics_hz` is a positive integer with a default of 500. Initialization uses:
+
+```python
+SimulationManager.setup_simulation(
+    dt=1.0 / args.physics_hz,
+    device=args.physics_device,
+)
+print(f'Physics device: {SimulationManager.get_device()}', flush=True)
+```
+
+The World constructor uses the same timestep/device. SimulationManager handles
+GPU/CPU dynamics and broadphase selection; the existing direct-GPU-access and
+GPU-articulation attributes follow the selected device. Startup prints the
+resolved device, physics rate and effective render/GPS rates.
+
+Both launch entrypoints forward the new rate argument. For example:
+
+```bash
+ros2 launch rs_isaac_uav_sim px4_sitl.launch.py \
+  num_drones:=1 ros2_namespaces:=drone_0 \
+  physics_device:=cuda physics_hz:=250 \
+  physics_threads:=0 direct_tensors:=true render_quality:=fast profile:=true
+```
+
+Direct entrypoint: add `--physics_hz 250 --physics_device cuda`.
+
+The per-step HIL sensors, ground truth and enabled ROS graph follow the selected
+physics rate. GPS and rendering use integer step dividers targeting approximately
+50 simulation Hz, capped at the physics rate. At 250 Hz both are 50 Hz; at 240 Hz
+they are 48 Hz. The startup timing line makes these rounded rates explicit.
+Stabilization still requires at least half a simulated second, and diagnostic
+frequency remains approximately once per simulated second.
+
+Reducing physics_hz reduces physics resolution and HIL/control data cadence.
+An RTF increase at 250 versus 500 Hz is not an equal-fidelity speedup. Check PX4
+estimation, actuator timing, takeoff and hover before selecting a lower rate.
+The default remains 500 Hz for an unchanged reference run.

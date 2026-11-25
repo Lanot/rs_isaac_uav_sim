@@ -154,6 +154,7 @@ def _launch_setup(context, *args, **kwargs):  # noqa: ARG001
     extra_px4_env_str = LaunchConfiguration('extra_px4_env').perform(context)
     ros2_namespaces = LaunchConfiguration('ros2_namespaces').perform(context)
     physics_device = LaunchConfiguration('physics_device').perform(context)
+    physics_hz = LaunchConfiguration('physics_hz').perform(context)
     profile = LaunchConfiguration('profile').perform(context)
     render_quality = LaunchConfiguration('render_quality').perform(context)
     direct_tensors = LaunchConfiguration('direct_tensors').perform(context)
@@ -198,6 +199,7 @@ def _launch_setup(context, *args, **kwargs):  # noqa: ARG001
     isaac_cmd = [isaac_sim_python, script_path, '--num_drones', str(num_drones),
                  '--base_port', base_port, '--connection_ip', connection_ip,
                  '--physics_device', physics_device, '--render_quality', render_quality]
+    isaac_cmd.extend(['--physics_hz', physics_hz])
     isaac_cmd.extend(['--physics_threads', physics_threads])
     if direct_tensors == 'true':
         isaac_cmd.append('--direct_tensors')
@@ -282,6 +284,9 @@ def _launch_setup(context, *args, **kwargs):  # noqa: ARG001
 
 def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'physics_hz', default_value='500',
+            description='Physics and per-step HIL/ROS rate in Hz (positive integer)'),
         DeclareLaunchArgument(
             'direct_tensors', default_value='false', choices=['true', 'false'],
             description='Use preallocated direct PhysX tensor IO (Isaac Sim 6.2)'),

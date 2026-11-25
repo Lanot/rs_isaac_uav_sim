@@ -182,7 +182,7 @@ class SensorParams:
         )
 
 
-MAVLINK_UPDATE_RATE: float = 500.0  # Hz — hardcoded, not configurable
+MAVLINK_UPDATE_RATE: float = 500.0  # Default physics/HIL rate; CLI can override it
 MAVLINK_CONNECTION_TYPE: str = 'tcpin'  # Isaac Sim connects as TCP client to PX4
 
 

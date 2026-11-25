@@ -39,6 +39,8 @@ parser.add_argument('--verbose', action='store_true',
                     help='Enable verbose MAVLink warnings')
 parser.add_argument('--physics_device', choices=('cpu', 'cuda'), default='cuda',
                     help='Physics/tensor device; CPU is worth testing for a small swarm')
+parser.add_argument('--physics_hz', type=int, default=500,
+                    help='Physics and per-step HIL sensor rate in Hz (default: 500)')
 parser.add_argument('--profile', action='store_true',
                     help='Report simulator RTF and inclusive phase timings every 5 wall seconds')
 parser.add_argument('--render_quality', choices=('current', 'fast'), default='current',
@@ -56,6 +58,8 @@ parser.add_argument('--ros2_namespaces', type=str, default='',
                           'OmniGraph, replacing the UDP ground-truth path. '
                           'Empty disables the ROS 2 bridge path.'))
 args, _unknown = parser.parse_known_args()
+if args.physics_hz <= 0:
+    parser.error('--physics_hz must be positive')
 if args.physics_threads < -1:
     parser.error('--physics_threads must be -1 or nonnegative')
 # Remove our custom flags from sys.argv so SimulationApp does not misinterpret them
@@ -129,13 +133,13 @@ if not args.headless:
 try:
     from isaacsim.core.api.objects import GroundPlane
     from isaacsim.core.api.world import World
+    from isaacsim.core.simulation_manager import SimulationManager
     from isaacsim.core.utils.stage import add_reference_to_stage
     from pxr import Gf, Sdf, UsdGeom, UsdLux
 
     from rs_isaac_uav_sim.sim.config import (
         GPSOrigin,
         load_config_from_yaml,
-        MAVLINK_UPDATE_RATE,
         MavlinkParams,
         QuadrotorParams,
         SensorParams,
@@ -155,10 +159,13 @@ except Exception:
 # 3. Physics scene configuration (GPU pipeline)
 # ---------------------------------------------------------------------------
 def setup_physics_scene(world):
+    SimulationManager.setup_simulation(
+        dt=1.0 / args.physics_hz,
+        device=args.physics_device,
+    )
+    print(f'Physics device: {SimulationManager.get_device()}', flush=True)
     physics_context = world.get_physics_context()
     use_gpu = args.physics_device == 'cuda'
-    physics_context.enable_gpu_dynamics(use_gpu)
-    physics_context.set_broadphase_type('GPU' if use_gpu else 'MBP')
 
     scene_prim = world.stage.GetPrimAtPath(physics_context.prim_path)
     scene_prim.CreateAttribute(
@@ -167,8 +174,9 @@ def setup_physics_scene(world):
     scene_prim.CreateAttribute(
         'physxScene:enableGpuArticulations', Sdf.ValueTypeNames.Bool
     ).Set(use_gpu)
-    print(f'[PHYSICS] device={args.physics_device}; GPU dynamics={use_gpu}; '
-          f'USD writeback={args.physics_device == "cpu"}')
+    print(f'[PHYSICS] device={SimulationManager.get_device()}; '
+          f'physics_hz={args.physics_hz}; GPU dynamics={use_gpu}; '
+          f'USD writeback={args.physics_device == "cpu"}', flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +375,7 @@ def main():
     mavlink_params.connection_ip = args.connection_ip
     mavlink_params.num_rotors = len(quad_params.rotor_positions)
 
-    physics_dt = 1.0 / MAVLINK_UPDATE_RATE  # 0.002 s @ 500 Hz
+    physics_dt = 1.0 / args.physics_hz
 
     print(f'\n{"="*70}')
     print('ISAAC SIM 6.0  —  MAVLink Multi-Drone Simulator')
@@ -376,7 +384,10 @@ def main():
     print(f'  Headless   : {args.headless}')
     print(f'  Config     : {args.config if args.config else "(defaults)"}')
     print(f'  Physics dt : {physics_dt*1000:.1f} ms  '
-          f'({MAVLINK_UPDATE_RATE:.0f} Hz)')
+          f'({args.physics_hz} Hz)')
+    if args.physics_hz != 500:
+        print(f'  HIL/ROS    : per-step data follows {args.physics_hz} Hz physics; '
+              'validate PX4 estimation/control at the selected rate')
     print(
         f'  MAVLink    : TCP ports '
         f'{mavlink_params.base_port + 1} – '
@@ -407,6 +418,7 @@ def main():
         gps_origin=gps_origin,
         verbose=args.verbose,
         direct_tensors=args.direct_tensors,
+        physics_hz=args.physics_hz,
     )
 
     # Spawn USD drone assets into the stage (computes default grid positions)
@@ -463,9 +475,11 @@ def main():
         f'{mavlink_params.base_port + args.num_drones}\n'
     )
 
-    # Render divider: world.render() is expensive — limit to 50 Hz even though
-    # physics runs at 500 Hz. This reduces GPU stall cost 10×.
-    _render_every_n = max(1, round(MAVLINK_UPDATE_RATE / 50.0))
+    # Render at approximately 50 simulation Hz, bounded by the physics rate.
+    _render_every_n = max(1, round(args.physics_hz / 50.0))
+    print(f'[TIMING] physics_hz={args.physics_hz}; '
+          f'render_hz={args.physics_hz / _render_every_n:g}; '
+          f'gps_hz={args.physics_hz / manager._gps_divider:g}', flush=True)
     _render_step = 0
 
     # When the ROS 2 bridge OmniGraph is active we push-evaluate the
