@@ -57,6 +57,10 @@ if(BUILD_TESTING)
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   )
 
+  ament_add_pytest_test(test_performance test/unit/test_performance.py
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  )
+
   ament_add_pytest_test(test_mavlink_scenarios test/integration/test_mavlink_scenarios.py
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     TIMEOUT 300

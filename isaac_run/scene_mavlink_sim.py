@@ -17,6 +17,7 @@
 import argparse
 import sys
 import time
+import traceback
 
 # ---------------------------------------------------------------------------
 # Parse arguments BEFORE SimulationApp initialisation
@@ -36,6 +37,12 @@ parser.add_argument('--connection_ip', type=str, default='localhost',
                     help='IP address of the PX4 SITL instance (default: localhost)')
 parser.add_argument('--verbose', action='store_true',
                     help='Enable verbose MAVLink warnings')
+parser.add_argument('--physics_device', choices=('cpu', 'cuda'), default='cuda',
+                    help='Physics/tensor device; CPU is worth testing for a small swarm')
+parser.add_argument('--profile', action='store_true',
+                    help='Report simulator RTF and inclusive phase timings every 5 wall seconds')
+parser.add_argument('--render_quality', choices=('current', 'fast'), default='current',
+                    help='Fast disables reflections, indirect diffuse and ambient occlusion')
 parser.add_argument('--ros2_namespaces', type=str, default='',
                     help=('Comma-separated list of ROS 2 namespaces, one '
                           'per drone (e.g. "drone_0,drone_1"). When '
@@ -62,8 +69,8 @@ _extra_args = (
 
 simulation_app = SimulationApp({
     'headless': args.headless,
-    'physics_device': 'cuda',
-    'device': 'cuda',
+    'physics_device': args.physics_device,
+    'device': args.physics_device,
     'scene_graph_instancing': True,
     'extra_args': _extra_args,
 })
@@ -72,13 +79,9 @@ import carb  # noqa: E402, I100
 
 _s = carb.settings.get_settings()
 
-# Balanced render config: keep RaytracedLighting (fastest RTX path) and the
-# cheap visual quality wins (shadows, TAA, AO, auto-exposure) which give
-# the biggest "looks like a real scene" boost per millisecond. Skip the
-# truly expensive features (indirect diffuse GI, real-time reflections,
-# path tracing) and the post-processing junk that adds visual noise
-# without telling you anything (motion blur, chromatic aberration,
-# vignette, lens flares).
+# Preserve the existing render settings unless the fast preset is requested.
+# The current preset includes reflections and indirect diffuse; the fast preset
+# disables those effects and ambient occlusion while retaining shadows and TAA.
 _s.set('/rtx/rendermode', 'RaytracedLighting')
 _s.set('/rtx/pathtracing/spp', 1)                # PT samples (only matters in PT mode)
 _s.set('/rtx/shadows/enabled', True)             # real-time shadows: biggest visual win
@@ -96,10 +99,13 @@ _s.set_bool('/rtx/post/lensFlares/enabled', False)
 _s.set_bool('/rtx/post/motionblur/enabled', False)
 _s.set_bool('/rtx/post/chromaticAberration/enabled', False)
 _s.set_bool('/rtx/post/vignetteMask/enabled', False)
-# Skip writing physics results back to USD layer — renderer uses Fabric directly.
-# Measured: saves ~0.34 ms on loop average (bench4 A vs C), allows GPU pipeline
-# to run more freely. Safe because we read state via get_world_poses(usd=False).
-_s.set_bool('/physics/updateToUSD', False)
+if args.render_quality == 'fast':
+    _s.set_bool('/rtx/reflections/enabled', False)
+    _s.set_bool('/rtx/indirectDiffuse/enabled', False)
+    _s.set_bool('/rtx/ambientOcclusion/enabled', False)
+# Preserve GPU Fabric-only writeback. CPU mode enables USD writeback so visuals
+# remain current without relying on GPU-specific Fabric configuration.
+_s.set_bool('/physics/updateToUSD', args.physics_device == 'cpu')
 print('[RENDER] Balanced render mode applied '
       '(RaytracedLighting + shadows + AO + TAA + auto-exposure).')
 
@@ -110,20 +116,29 @@ if not args.headless:
 # ---------------------------------------------------------------------------
 # 2. Imports (all Omniverse/USD imports AFTER SimulationApp)
 # ---------------------------------------------------------------------------
-from isaacsim.core.api.objects import GroundPlane  # noqa: E402
-from isaacsim.core.api.world import World  # noqa: E402
-from isaacsim.core.utils.stage import add_reference_to_stage  # noqa: E402
-from pxr import Gf, Sdf, UsdGeom, UsdLux  # noqa: E402
+try:
+    from isaacsim.core.api.objects import GroundPlane
+    from isaacsim.core.api.world import World
+    from isaacsim.core.utils.stage import add_reference_to_stage
+    from pxr import Gf, Sdf, UsdGeom, UsdLux
 
-from rs_isaac_uav_sim.sim.config import (  # noqa: E402
-    GPSOrigin,
-    load_config_from_yaml,
-    MAVLINK_UPDATE_RATE,
-    MavlinkParams,
-    QuadrotorParams,
-    SensorParams,
-)
-from rs_isaac_uav_sim.sim.vehicle import DroneSimManager  # noqa: E402
+    from rs_isaac_uav_sim.sim.config import (
+        GPSOrigin,
+        load_config_from_yaml,
+        MAVLINK_UPDATE_RATE,
+        MavlinkParams,
+        QuadrotorParams,
+        SensorParams,
+    )
+    from rs_isaac_uav_sim.sim.vehicle import DroneSimManager
+    from rs_isaac_uav_sim.sim.performance import SimulationProfiler
+except Exception:
+    # Print before Kit's fast shutdown can terminate the Python interpreter.
+    print('[STARTUP ERROR] Simulator imports failed:', file=sys.stderr, flush=True)
+    traceback.print_exc(file=sys.stderr)
+    sys.stderr.flush()
+    simulation_app.close(exit_code=1)
+    raise SystemExit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -131,17 +146,19 @@ from rs_isaac_uav_sim.sim.vehicle import DroneSimManager  # noqa: E402
 # ---------------------------------------------------------------------------
 def setup_physics_scene(world):
     physics_context = world.get_physics_context()
-    physics_context.enable_gpu_dynamics(True)
-    physics_context.set_broadphase_type('GPU')
+    use_gpu = args.physics_device == 'cuda'
+    physics_context.enable_gpu_dynamics(use_gpu)
+    physics_context.set_broadphase_type('GPU' if use_gpu else 'MBP')
 
     scene_prim = world.stage.GetPrimAtPath(physics_context.prim_path)
     scene_prim.CreateAttribute(
         'physxScene:enableDirectGpuAccess', Sdf.ValueTypeNames.Bool
-    ).Set(True)
+    ).Set(use_gpu)
     scene_prim.CreateAttribute(
         'physxScene:enableGpuArticulations', Sdf.ValueTypeNames.Bool
-    ).Set(True)
-    print('[PHYSICS] GPU scene configured.')
+    ).Set(use_gpu)
+    print(f'[PHYSICS] device={args.physics_device}; GPU dynamics={use_gpu}; '
+          f'USD writeback={args.physics_device == "cpu"}')
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +377,7 @@ def main():
     world = World(
         stage_units_in_meters=1.0,
         backend='torch',
-        device='cuda',
+        device=args.physics_device,
         physics_dt=physics_dt,
         rendering_dt=1.0 / 50.0,
     )
@@ -455,22 +472,37 @@ def main():
     else:
         _evaluate_bridge = None
 
+    profiler = (SimulationProfiler(world.current_time, physics_dt)
+                if args.profile else None)
+    manager.profiler = profiler
+
     while simulation_app.is_running():
         t_loop_begin = time.monotonic()
-        manager.step(physics_dt)
-        world.step(render=False)
-        if _evaluate_bridge is not None:
-            _evaluate_bridge()
+        if profiler is None:
+            manager.step(physics_dt)
+            world.step(render=False)
+            if _evaluate_bridge is not None:
+                _evaluate_bridge()
+        else:
+            profiler.call('vehicle.step', manager.step, physics_dt)
+            profiler.call('physics.step', world.step, render=False)
+            if _evaluate_bridge is not None:
+                profiler.call('ros2.graph', _evaluate_bridge)
         if not args.headless:
             _render_step += 1
             if _render_step >= _render_every_n:
                 t_render_begin = time.monotonic()
-                world.render()
+                if profiler is None:
+                    world.render()
+                else:
+                    profiler.call('app.render', world.render)
                 t_render_end = time.monotonic()
                 manager.record_render_timing(t_render_begin, t_render_end)
                 _render_step = 0
         t_loop_end = time.monotonic()
         manager.record_loop_timing(t_loop_begin, t_loop_end)
+        if profiler is not None:
+            profiler.sample(world.current_time)
 
     print('\n[SHUTDOWN] Closing simulation...')
     manager.close()
@@ -478,4 +510,14 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        simulation_app.close(exit_code=130)
+        raise SystemExit(130)
+    except Exception:
+        print('[SIMULATION ERROR] main() failed:', file=sys.stderr, flush=True)
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+        simulation_app.close(exit_code=1)
+        raise SystemExit(1)

@@ -28,6 +28,7 @@ from scipy.spatial.transform import Rotation
 from .config import GPSOrigin, MAVLINK_UPDATE_RATE, MavlinkParams, QuadrotorParams, SensorParams
 from .dynamics import QuadrotorDynamics
 from .mavlink_backend import PX4MavlinkHIL
+from .performance import SimulationProfiler
 from .sensors import (
     BarometerSensor,
     GPSSensor,
@@ -147,6 +148,7 @@ class DroneSimManager:
         self._frame_view = None
         self._torch: Any = None
         self._device = 'cuda'
+        self.profiler: Optional[SimulationProfiler] = None
 
         # GPS divider: send GPS at ~50 Hz
         self._gps_counter = 0
@@ -231,6 +233,8 @@ class DroneSimManager:
         from isaacsim.core.prims import Articulation, RigidPrim
 
         self._torch = torch
+        # The physics view, state tensors and wrench buffers must share a device.
+        self._device = str(world.device)
 
         if positions is None:
             positions = self._grid_positions(self.num_drones)
@@ -355,13 +359,19 @@ class DroneSimManager:
         torch = self._torch
 
         # --- 1. Read state from GPU ---
+        profiler = self.profiler
+        t_readback = profiler.clock() if profiler is not None else 0.0
         # Batch the three tensors into one before transferring to CPU.
         # A single .cpu() call amortises the CUDA stream synchronisation
         # overhead (~40% faster transfer vs three separate calls).
-        positions_t, orientations_t = self._frame_view.get_world_poses(usd=False)  # type: ignore
-        velocities_t = self._frame_view.get_velocities()  # type: ignore
+        positions_t, orientations_t = self._frame_view.get_world_poses(usd=False, clone=False)  # type: ignore
+        velocities_t = self._frame_view.get_velocities(clone=False)  # type: ignore
 
+        # Concatenation owns a snapshot before the next physics step can reuse
+        # view buffers, so additional clones inside each getter are unnecessary.
         _batch = torch.cat([positions_t, orientations_t, velocities_t], dim=1).cpu().numpy()
+        if profiler is not None:
+            profiler.record('vehicle.readback', profiler.clock() - t_readback)
         positions_np = _batch[:, :3]          # (N, 3)
         orientations_np = _batch[:, 3:7]      # (N, 4) [w, x, y, z]
         velocities_np = _batch[:, 7:]         # (N, 6) [vx,vy,vz,wx,wy,wz]
@@ -432,8 +442,13 @@ class DroneSimManager:
                 self._last_gps_vo[i] = gps_data
 
             # --- 5. MAVLink update: send HIL data, receive motor commands ---
-            backend.update()
-            backend.send_ground_truth(state, backend.current_utime)
+            if profiler is None:
+                backend.update()
+                backend.send_ground_truth(state, backend.current_utime)
+            else:
+                profiler.call('mavlink.update', backend.update)
+                profiler.call('mavlink.ground_truth', backend.send_ground_truth,
+                              state, backend.current_utime)
 
             # --- 6. Compute forces/torques in body frame ---
             motor_omega = backend.motor_commands  # (4,) [rad/s]
@@ -449,6 +464,7 @@ class DroneSimManager:
         # PhysicsRigidBodyAPI). Reuse the pre-allocated tensors instead
         # of constructing fresh ones each step — copy_() avoids the
         # per-step allocation + dispatch cost of torch.tensor(...).
+        t_force = profiler.clock() if profiler is not None else 0.0
         self._forces_tensor.copy_(  # type: ignore
             torch.from_numpy(forces_world.astype(np.float32, copy=False)),  # type: ignore
             non_blocking=True,
@@ -460,6 +476,8 @@ class DroneSimManager:
         self._frame_view.apply_forces_and_torques_at_pos(  # type: ignore
             self._forces_tensor, self._torques_tensor, is_global=True
         )
+        if profiler is not None:
+            profiler.record('vehicle.force_submit', profiler.clock() - t_force)
 
         # Diagnostics — opt-in via the manager's verbose flag
         if self._verbose:

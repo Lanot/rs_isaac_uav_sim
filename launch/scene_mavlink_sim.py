@@ -39,9 +39,15 @@ def _launch_setup(context, *args, **kwargs):
     config_file = LaunchConfiguration('config_file').perform(context)
     base_port = LaunchConfiguration('base_port').perform(context)
     connection_ip = LaunchConfiguration('connection_ip').perform(context)
+    physics_device = LaunchConfiguration('physics_device').perform(context)
+    profile = LaunchConfiguration('profile').perform(context)
+    render_quality = LaunchConfiguration('render_quality').perform(context)
 
     cmd = [isaac_sim_python, script_path, '--num_drones', num_drones,
-           '--base_port', base_port, '--connection_ip', connection_ip]
+           '--base_port', base_port, '--connection_ip', connection_ip,
+           '--physics_device', physics_device, '--render_quality', render_quality]
+    if profile == 'true':
+        cmd.append('--profile')
     if headless == 'true':
         cmd.append('--headless')
     if config_file:
@@ -52,6 +58,15 @@ def _launch_setup(context, *args, **kwargs):
 
 def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'physics_device', default_value='cuda', choices=['cpu', 'cuda'],
+            description='Physics/tensor device; rendering still uses the GPU'),
+        DeclareLaunchArgument(
+            'profile', default_value='false', choices=['true', 'false'],
+            description='Report actual simulator RTF and phase timings'),
+        DeclareLaunchArgument(
+            'render_quality', default_value='current', choices=['current', 'fast'],
+            description='Fast disables reflections, indirect diffuse and AO'),
         DeclareLaunchArgument(
             'num_drones',
             default_value='1',

@@ -15,6 +15,7 @@ Full docs are published via GitHub Pages at
 - [Quickstart](docs/quickstart.md)  – run the demo in <5 commands
 - [Architecture](docs/architecture.md) – physics loop, MAVLink lockstep, coordinate frames
 - [Configuration](docs/configuration.md) – YAML schema for drones, sensors, GPS
+- [Performance](docs/performance.md) – CPU/CUDA comparison and native RTF profiling
 
 ## Quickstart
 
@@ -73,6 +74,23 @@ or use the bundled ROS 2 launch files for finer control:
 ```bash
 # Sim + N×PX4 instances together
 ros2 launch rs_isaac_uav_sim px4_sitl.launch.py num_drones:=1
+
+# OR
+ros2 launch rs_isaac_uav_sim px4_sitl.launch.py \
+  num_drones:=1 ros2_namespaces:=drone_0 physics_device:=cpu profile:=true 
+
+# OR
+ros2 launch rs_isaac_uav_sim px4_sitl.launch.py \
+  num_drones:=1 ros2_namespaces:=drone_0 physics_device:=cuda profile:=true 
+
+# OR
+ros2 launch rs_isaac_uav_sim px4_sitl.launch.py \
+  num_drones:=2 ros2_namespaces:=drone_0,drone_1 physics_device:=cuda profile:=true 
+
+# OR
+ros2 launch rs_isaac_uav_sim px4_sitl.launch.py \
+  num_drones:=1 ros2_namespaces:=drone_0 render_quality:=fast
+
 
 # Sim only (you bring your own controller)
 ros2 launch rs_isaac_uav_sim scene_mavlink_sim.py num_drones:=1

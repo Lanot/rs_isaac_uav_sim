@@ -153,6 +153,9 @@ def _launch_setup(context, *args, **kwargs):  # noqa: ARG001
     airframe_file = LaunchConfiguration('airframe_file').perform(context)
     extra_px4_env_str = LaunchConfiguration('extra_px4_env').perform(context)
     ros2_namespaces = LaunchConfiguration('ros2_namespaces').perform(context)
+    physics_device = LaunchConfiguration('physics_device').perform(context)
+    profile = LaunchConfiguration('profile').perform(context)
+    render_quality = LaunchConfiguration('render_quality').perform(context)
 
     extra_px4_env, rejected_param_keys = _parse_extra_px4_env(extra_px4_env_str)
 
@@ -191,7 +194,10 @@ def _launch_setup(context, *args, **kwargs):  # noqa: ARG001
     )
 
     isaac_cmd = [isaac_sim_python, script_path, '--num_drones', str(num_drones),
-                 '--base_port', base_port, '--connection_ip', connection_ip]
+                 '--base_port', base_port, '--connection_ip', connection_ip,
+                 '--physics_device', physics_device, '--render_quality', render_quality]
+    if profile == 'true':
+        isaac_cmd.append('--profile')
     if headless == 'true':
         isaac_cmd.append('--headless')
     if verbose == 'true':
@@ -271,6 +277,15 @@ def _launch_setup(context, *args, **kwargs):  # noqa: ARG001
 
 def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'physics_device', default_value='cuda', choices=['cpu', 'cuda'],
+            description='Physics/tensor device; rendering still uses the GPU'),
+        DeclareLaunchArgument(
+            'profile', default_value='false', choices=['true', 'false'],
+            description='Report actual simulator RTF and phase timings'),
+        DeclareLaunchArgument(
+            'render_quality', default_value='current', choices=['current', 'fast'],
+            description='Fast disables reflections, indirect diffuse and AO'),
         DeclareLaunchArgument(
             'num_drones',
             default_value='1',
