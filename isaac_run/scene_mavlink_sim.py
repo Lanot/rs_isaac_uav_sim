@@ -43,6 +43,10 @@ parser.add_argument('--profile', action='store_true',
                     help='Report simulator RTF and inclusive phase timings every 5 wall seconds')
 parser.add_argument('--render_quality', choices=('current', 'fast'), default='current',
                     help='Fast disables reflections, indirect diffuse and ambient occlusion')
+parser.add_argument('--direct_tensors', action='store_true',
+                    help='Use preallocated direct PhysX tensor IO (Isaac Sim 6.2)')
+parser.add_argument('--physics_threads', type=int, default=-1,
+                    help='PhysX worker count; -1 keeps existing settings, 0 tests serial dispatch')
 parser.add_argument('--ros2_namespaces', type=str, default='',
                     help=('Comma-separated list of ROS 2 namespaces, one '
                           'per drone (e.g. "drone_0,drone_1"). When '
@@ -52,6 +56,8 @@ parser.add_argument('--ros2_namespaces', type=str, default='',
                           'OmniGraph, replacing the UDP ground-truth path. '
                           'Empty disables the ROS 2 bridge path.'))
 args, _unknown = parser.parse_known_args()
+if args.physics_threads < -1:
+    parser.error('--physics_threads must be -1 or nonnegative')
 # Remove our custom flags from sys.argv so SimulationApp does not misinterpret them
 sys.argv = [sys.argv[0]] + _unknown
 
@@ -78,6 +84,10 @@ simulation_app = SimulationApp({
 import carb  # noqa: E402, I100
 
 _s = carb.settings.get_settings()
+if args.physics_threads >= 0:
+    _s.set_int('/persistent/physics/numThreads', args.physics_threads)
+print(f'[PERF] direct_tensors={args.direct_tensors}; '
+      f'physics_threads={_s.get("/persistent/physics/numThreads")}', flush=True)
 
 # Preserve the existing render settings unless the fast preset is requested.
 # The current preset includes reflections and indirect diffuse; the fast preset
@@ -396,6 +406,7 @@ def main():
         mavlink_params=mavlink_params,
         gps_origin=gps_origin,
         verbose=args.verbose,
+        direct_tensors=args.direct_tensors,
     )
 
     # Spawn USD drone assets into the stage (computes default grid positions)

@@ -91,6 +91,16 @@ ros2 launch rs_isaac_uav_sim px4_sitl.launch.py \
 ros2 launch rs_isaac_uav_sim px4_sitl.launch.py \
   num_drones:=1 ros2_namespaces:=drone_0 render_quality:=fast
 
+# OR
+ros2 launch rs_isaac_uav_sim px4_sitl.launch.py \
+  num_drones:=1 \
+  ros2_namespaces:=drone_0 \
+  physics_device:=cuda \
+  profile:=true \
+  render_quality:=fast \
+  physics_threads:=12 \
+  direct_tensors:=true 
+
 
 # Sim only (you bring your own controller)
 ros2 launch rs_isaac_uav_sim scene_mavlink_sim.py num_drones:=1

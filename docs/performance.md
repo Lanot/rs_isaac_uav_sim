@@ -97,3 +97,53 @@ using real Torch CPU tensors with fake simulator views/transport, snapshot
 ownership, launch argument forwarding, profiler resets and exception propagation.
 Real GPU-host launch, GUI transforms, ROS odometry and flight validation are still
 required. No RTF improvement is claimed until the patched simulator is measured.
+
+## CUDA IO experiment (Isaac Sim 6.2)
+
+The recorded CUDA windows around RTF 0.50 show roughly 1.97 ms per physics
+step, 1.50 ms per vehicle update, 0.41 ms force submission and 0.26 ms state
+readback. Force submission and readback are included in the vehicle update.
+The ROS graph is roughly 0.08 ms per step; rendering is roughly 3.8 ms every ten
+steps, or 0.38 ms per physics step. These are observed example windows, not
+guaranteed costs or a performance prediction for a different world.
+
+The high-level RigidPrim wrench wrapper allocates zero buffers and scatters the
+provided forces/torques into them on every call. Its state getters also perform
+indexing and quaternion reordering on the device. The optional direct path:
+
+- Reuses the already initialized native rigid-body tensor view in its original
+  body order, avoiding wrapper indexing and wrench scatter allocations.
+- Packs state into a reusable device buffer and reads into pinned host memory.
+- Converts the native xyzw quaternion to the existing wxyz convention on CPU.
+- Packs forces and torques into one host-to-device transfer, using fixed buffers
+  and cached int32 body indices.
+- Uses blocking copies to keep state current and host-buffer reuse safe. It does
+  not hide latency by using old sensor state or weaken control-loop timing.
+
+The binding to `RigidPrim._physics_view` is internal to the installed Isaac Sim
+6.2 wrapper. The native tensor operations are the same underlying API the wrapper
+uses. The adapter checks initialization and body count; it remains opt-in because
+this wrapper binding is version-specific. Reinitialize the manager after any
+physics reset before reusing direct tensor handles.
+
+Run the same CUDA workload first with `direct_tensors:=false`, then with:
+
+```bash
+ros2 launch rs_isaac_uav_sim px4_sitl.launch.py \
+  num_drones:=1 ros2_namespaces:=drone_0 physics_device:=cuda profile:=true \
+  direct_tensors:=true
+```
+
+Next, keep that command and add `physics_threads:=0`. This sets PhysX's CPU
+worker count, not the physics device: dynamics and broadphase remain on CUDA.
+A small scene can spend more time dispatching workers than doing useful work.
+Compare `physics_threads:=0`, `physics_threads:=1` and the default `-1` (leave
+the current setting untouched). Startup prints the effective setting. Restart
+the process between comparisons; do not change solver iteration counts or dt.
+
+Compare stable `vehicle.readback`, `vehicle.force_submit`, `vehicle.step` and
+`physics.step` times. If physics alone remains near 2 ms, reaching real time at
+500 Hz also requires reducing native physics cost. These IO changes cannot by
+themselves guarantee RTF 1.0. Tracy/Nsight profiling or simplifying the drone's
+physical articulation is then the next investigation, with separate fidelity
+checks before adopting a simpler physical model.

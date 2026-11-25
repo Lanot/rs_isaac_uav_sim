@@ -82,7 +82,8 @@ def test_invalid_measurement_parameters(interval, dt):
 
 
 @pytest.mark.parametrize('profile', [False, True])
-def test_cpu_step_preserves_frame_conversion_and_owns_state_snapshot(profile):
+@pytest.mark.parametrize('direct', [False, True])
+def test_cpu_step_preserves_frame_conversion_and_owns_state_snapshot(profile, direct):
     """Exercise the actual step body with real CPU tensors and fake IO/views."""
     import ast
     from pathlib import Path
@@ -94,6 +95,7 @@ def test_cpu_step_preserves_frame_conversion_and_owns_state_snapshot(profile):
     import torch
 
     from rs_isaac_uav_sim.sim.state import VehicleState
+    from rs_isaac_uav_sim.sim.tensor_io import DirectTensorIO
 
     # Loading only this method avoids booting Kit in an offline unit test.
     # View and transport boundaries are fakes; tensor/math operations are real.
@@ -111,7 +113,24 @@ def test_cpu_step_preserves_frame_conversion_and_owns_state_snapshot(profile):
     velocity = torch.tensor([[2.0, 0.0, 0.0, 0.0, 1.0, 0.0]], dtype=torch.float32)
     applied = []
 
+    class NativeView:
+        count = 1
+
+        def get_transforms(self):
+            return torch.cat((pose, orientation[:, [1, 2, 3, 0]]), dim=1)
+
+        def get_velocities(self):
+            return velocity
+
+        def apply_forces_and_torques_at_position(self, **kwargs):
+            assert kwargs['position_data'] is None
+            assert kwargs['is_global']
+            assert kwargs['indices'].dtype == torch.int32
+            applied.append((kwargs['force_data'].clone(), kwargs['torque_data'].clone()))
+
     class View:
+        _physics_view = NativeView()
+
         def get_world_poses(self, *, usd, clone):
             assert not usd and not clone
             return pose, orientation
@@ -131,9 +150,11 @@ def test_cpu_step_preserves_frame_conversion_and_owns_state_snapshot(profile):
                               motor_commands=np.zeros(4))
     dynamics = SimpleNamespace(compute_forces_and_torques=lambda omega, state:
                                (np.array([0.0, 0.0, 9.81]), np.array([1.0, 2.0, 3.0])))
+    view = View()
     manager = SimpleNamespace(
         _prims=SimpleNamespace(is_physics_handle_valid=lambda: True),
-        _frame_view=View(), _torch=torch, num_drones=1,
+        _frame_view=view, _torch=torch, num_drones=1,
+        _tensor_io=DirectTensorIO(view, torch, 'cpu', 1) if direct else None,
         profiler=SimulationProfiler(0.0, 0.002) if profile else None,
         _gps_counter=0, _gps_divider=10, states=[state],
         _stable_count=[0], _stabilized=[True], baro_sensors=[sensor],
@@ -163,6 +184,7 @@ def test_launch_forwards_selected_device_and_profiling(filename, monkeypatch):
     from pathlib import Path
 
     settings = {'physics_device': 'cpu', 'profile': 'true', 'render_quality': 'fast',
+                'direct_tensors': 'true', 'physics_threads': '0',
                 'num_drones': '0', 'headless': 'true', 'config_file': '', 'world_usd': '',
                 'base_port': '4560', 'connection_ip': 'localhost', 'verbose': 'false',
                 'ros2_namespaces': '', 'extra_px4_env': '', 'airframe_file': '',
@@ -188,5 +210,51 @@ def test_launch_forwards_selected_device_and_profiling(filename, monkeypatch):
     assert command[command.index('--physics_device') + 1] == 'cpu'
     assert command[command.index('--render_quality') + 1] == 'fast'
     assert '--profile' in command
+    assert '--direct_tensors' in command
+    assert command[command.index('--physics_threads') + 1] == '0'
     settings['profile'] = 'false'
-    assert '--profile' not in namespace['_launch_setup'](None)[0]['cmd']
+    settings['direct_tensors'] = 'false'
+    command = namespace['_launch_setup'](None)[0]['cmd']
+    assert '--profile' not in command
+    assert '--direct_tensors' not in command
+
+
+def test_direct_tensor_io_reuses_buffers_and_preserves_multiple_body_order():
+    """Packed IO must not reorder drones or corrupt older sensor snapshots."""
+    from types import SimpleNamespace
+
+    import numpy as np
+    from numpy.testing import assert_allclose
+    import torch
+
+    from rs_isaac_uav_sim.sim.tensor_io import DirectTensorIO
+
+    transforms = torch.tensor([[1, 2, 3, 0, 0, 0, 1], [4, 5, 6, 0, 0, 1, 0]],
+                              dtype=torch.float32)
+    velocities = torch.arange(12, dtype=torch.float32).reshape(2, 6)
+    submissions = []
+    native = SimpleNamespace(count=2, get_transforms=lambda: transforms,
+                             get_velocities=lambda: velocities,
+                             apply_forces_and_torques_at_position=lambda **kwargs:
+                             submissions.append(kwargs))
+    adapter = DirectTensorIO(SimpleNamespace(_physics_view=native), torch, 'cpu', 2)
+    state_pointer = adapter.state_device.data_ptr()
+    wrench_pointer = adapter.wrench_device.data_ptr()
+    positions, orientations, original_velocities = adapter.read_state()
+    assert_allclose(orientations, [[1, 0, 0, 0], [0, 0, 0, 1]])
+    for multiplier in [1.0, 2.0]:
+        forces = np.ones((2, 3)) * multiplier
+        torques = np.ones((2, 3)) * -multiplier
+        adapter.apply_wrenches(forces, torques)
+        assert_allclose(submissions[-1]['force_data'].numpy(), forces)
+        assert_allclose(submissions[-1]['torque_data'].numpy(), torques)
+    transforms.zero_()
+    velocities.zero_()
+    adapter.read_state()
+    assert_allclose(positions, [[1, 2, 3], [4, 5, 6]])
+    assert_allclose(original_velocities, np.arange(12).reshape(2, 6))
+    assert adapter.state_device.data_ptr() == state_pointer
+    assert adapter.wrench_device.data_ptr() == wrench_pointer
+    assert submissions[-1]['indices'].tolist() == [0, 1]
+    with pytest.raises(RuntimeError, match='configured drone count'):
+        DirectTensorIO(SimpleNamespace(_physics_view=native), torch, 'cpu', 3)

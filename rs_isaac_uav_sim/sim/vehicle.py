@@ -29,6 +29,7 @@ from .config import GPSOrigin, MAVLINK_UPDATE_RATE, MavlinkParams, QuadrotorPara
 from .dynamics import QuadrotorDynamics
 from .mavlink_backend import PX4MavlinkHIL
 from .performance import SimulationProfiler
+from .tensor_io import DirectTensorIO
 from .sensors import (
     BarometerSensor,
     GPSSensor,
@@ -93,6 +94,7 @@ class DroneSimManager:
         mavlink_params: Optional[MavlinkParams] = None,
         gps_origin: Optional[GPSOrigin] = None,
         verbose: bool = False,
+        direct_tensors: bool = False,
     ):
         self._logger = get_logger(self.__class__.__name__)
 
@@ -149,6 +151,8 @@ class DroneSimManager:
         self._torch: Any = None
         self._device = 'cuda'
         self.profiler: Optional[SimulationProfiler] = None
+        self._direct_tensors = direct_tensors
+        self._tensor_io: Optional[DirectTensorIO] = None
 
         # GPS divider: send GPS at ~50 Hz
         self._gps_counter = 0
@@ -318,6 +322,10 @@ class DroneSimManager:
         self._torques_tensor = torch.zeros(  # type: ignore
             (self.num_drones, 3), dtype=torch.float32, device=self._device
         )
+        if self._direct_tensors:
+            self._tensor_io = DirectTensorIO(
+                self._frame_view, torch, self._device, self.num_drones)
+            self._logger.info('[PERF] Direct PhysX tensors and packed wrench transfer enabled')
 
         self._logger.info(f'[VEHICLE] ArticulationView initialized for {self.num_drones} '
               f'drone(s).')
@@ -364,17 +372,18 @@ class DroneSimManager:
         # Batch the three tensors into one before transferring to CPU.
         # A single .cpu() call amortises the CUDA stream synchronisation
         # overhead (~40% faster transfer vs three separate calls).
-        positions_t, orientations_t = self._frame_view.get_world_poses(usd=False, clone=False)  # type: ignore
-        velocities_t = self._frame_view.get_velocities(clone=False)  # type: ignore
-
-        # Concatenation owns a snapshot before the next physics step can reuse
-        # view buffers, so additional clones inside each getter are unnecessary.
-        _batch = torch.cat([positions_t, orientations_t, velocities_t], dim=1).cpu().numpy()
+        if self._tensor_io is None:
+            positions_t, orientations_t = self._frame_view.get_world_poses(usd=False, clone=False)  # type: ignore
+            velocities_t = self._frame_view.get_velocities(clone=False)  # type: ignore
+            # Concatenation owns a snapshot before the next physics step.
+            _batch = torch.cat([positions_t, orientations_t, velocities_t], dim=1).cpu().numpy()
+            positions_np = _batch[:, :3]
+            orientations_np = _batch[:, 3:7]  # wxyz
+            velocities_np = _batch[:, 7:]
+        else:
+            positions_np, orientations_np, velocities_np = self._tensor_io.read_state()
         if profiler is not None:
             profiler.record('vehicle.readback', profiler.clock() - t_readback)
-        positions_np = _batch[:, :3]          # (N, 3)
-        orientations_np = _batch[:, 3:7]      # (N, 4) [w, x, y, z]
-        velocities_np = _batch[:, 7:]         # (N, 6) [vx,vy,vz,wx,wy,wz]
 
         # Prepare output buffers
         forces_world = np.zeros((self.num_drones, 3))
@@ -465,17 +474,20 @@ class DroneSimManager:
         # of constructing fresh ones each step — copy_() avoids the
         # per-step allocation + dispatch cost of torch.tensor(...).
         t_force = profiler.clock() if profiler is not None else 0.0
-        self._forces_tensor.copy_(  # type: ignore
-            torch.from_numpy(forces_world.astype(np.float32, copy=False)),  # type: ignore
-            non_blocking=True,
-        )
-        self._torques_tensor.copy_(  # type: ignore
-            torch.from_numpy(torques_world.astype(np.float32, copy=False)),  # type: ignore
-            non_blocking=True,
-        )
-        self._frame_view.apply_forces_and_torques_at_pos(  # type: ignore
-            self._forces_tensor, self._torques_tensor, is_global=True
-        )
+        if self._tensor_io is None:
+            self._forces_tensor.copy_(  # type: ignore
+                torch.from_numpy(forces_world.astype(np.float32, copy=False)),
+                non_blocking=True,
+            )
+            self._torques_tensor.copy_(  # type: ignore
+                torch.from_numpy(torques_world.astype(np.float32, copy=False)),
+                non_blocking=True,
+            )
+            self._frame_view.apply_forces_and_torques_at_pos(  # type: ignore
+                self._forces_tensor, self._torques_tensor, is_global=True
+            )
+        else:
+            self._tensor_io.apply_wrenches(forces_world, torques_world)
         if profiler is not None:
             profiler.record('vehicle.force_submit', profiler.clock() - t_force)
 

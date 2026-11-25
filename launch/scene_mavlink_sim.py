@@ -42,10 +42,15 @@ def _launch_setup(context, *args, **kwargs):
     physics_device = LaunchConfiguration('physics_device').perform(context)
     profile = LaunchConfiguration('profile').perform(context)
     render_quality = LaunchConfiguration('render_quality').perform(context)
+    direct_tensors = LaunchConfiguration('direct_tensors').perform(context)
+    physics_threads = LaunchConfiguration('physics_threads').perform(context)
 
     cmd = [isaac_sim_python, script_path, '--num_drones', num_drones,
            '--base_port', base_port, '--connection_ip', connection_ip,
            '--physics_device', physics_device, '--render_quality', render_quality]
+    cmd.extend(['--physics_threads', physics_threads])
+    if direct_tensors == 'true':
+        cmd.append('--direct_tensors')
     if profile == 'true':
         cmd.append('--profile')
     if headless == 'true':
@@ -58,6 +63,12 @@ def _launch_setup(context, *args, **kwargs):
 
 def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'direct_tensors', default_value='false', choices=['true', 'false'],
+            description='Use preallocated direct PhysX tensor IO (Isaac Sim 6.2)'),
+        DeclareLaunchArgument(
+            'physics_threads', default_value='-1',
+            description='PhysX worker count; -1 preserves current settings, 0 is serial'),
         DeclareLaunchArgument(
             'physics_device', default_value='cuda', choices=['cpu', 'cuda'],
             description='Physics/tensor device; rendering still uses the GPU'),
