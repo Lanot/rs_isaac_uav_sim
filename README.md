@@ -22,7 +22,7 @@ Full docs are published via GitHub Pages at
 The fastest path to a flying drone is the bundled Docker image:
 
 ```bash
-git clone https://github.com/Robotsix-UAV/rs_isaac_uav_sim.git
+git clone https://github.com/Lanot/rs_isaac_uav_sim.git
 cd rs_isaac_uav_sim
 
 # One-time on the host: allow the container to draw on your X display
@@ -58,7 +58,7 @@ Build with `colcon`:
 ```bash
 export ISAAC_SIM_PYTHON=/opt/isaacsim/python
 mkdir -p ws/src && cd ws/src
-git clone https://github.com/Robotsix-UAV/rs_isaac_uav_sim.git
+git clone https://github.com/Lanot/rs_isaac_uav_sim.git
 cd .. && colcon build --packages-select rs_isaac_uav_sim
 source install/setup.bash
 ```
